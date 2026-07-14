@@ -24,7 +24,7 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 		Spec:       trafficv1alpha1.TrafficScenarioSpec{Target: trafficv1alpha1.TargetSpec{BaseURL: "http://shorturl.shorturl.svc.cluster.local"}},
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
-	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
+	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RunnerImagePullSecret: "registry-secret"}
 
 	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -46,6 +46,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "example.test/kurama:test" {
 		t.Fatalf("runner image = %q", got)
 	}
+	if got := deployment.Spec.Template.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-secret" {
+		t.Fatalf("runner imagePullSecrets = %#v", got)
+	}
 }
 
 func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
@@ -56,7 +59,7 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
 		Spec:       trafficv1alpha1.TrafficScenarioSpec{Target: trafficv1alpha1.TargetSpec{BaseURL: "https://shorturl.example.test"}, Suspend: true},
 	}
-	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test")
+	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "")
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario, deployment).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
 
