@@ -31,8 +31,9 @@ const (
 // configuration rather than CRD data: image provenance remains GitOps-owned.
 type TrafficScenarioReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	RunnerImage string
+	Scheme                *runtime.Scheme
+	RunnerImage           string
+	RunnerImagePullSecret string
 }
 
 // +kubebuilder:rbac:groups=traffic.kurama.dev,resources=trafficscenarios,verbs=get;list;watch
@@ -76,7 +77,7 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return r.failed(ctx, &scenario, err)
 	}
 
-	deployment := desiredDeployment(&scenario, name, r.RunnerImage)
+	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret)
 	if err := controllerutil.SetControllerReference(&scenario, deployment, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set Deployment owner: %w", err)
 	}
@@ -108,8 +109,20 @@ func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *c
 	}
 }
 
-func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image string) *appsv1.Deployment {
+func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, imagePullSecret string) *appsv1.Deployment {
 	labels := labels(scenario)
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:         "runner",
+			Image:        image,
+			Command:      []string{"/app/runner"},
+			VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
+		}},
+		Volumes: []corev1.Volume{{Name: "scenario", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
+	}
+	if imagePullSecret != "" {
+		podSpec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: imagePullSecret}}
+	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
@@ -117,15 +130,7 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image st
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:         "runner",
-						Image:        image,
-						Command:      []string{"/app/runner"},
-						VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
-					}},
-					Volumes: []corev1.Volume{{Name: "scenario", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
-				},
+				Spec:       podSpec,
 			},
 		},
 	}
