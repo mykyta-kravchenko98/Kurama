@@ -10,7 +10,9 @@ on:
     branches: [main]
     paths:
       - "cmd/**"
+      - "api/**"
       - "internal/**"
+      - "config/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile"
@@ -21,7 +23,9 @@ on:
     branches: [main]
     paths:
       - "cmd/**"
+      - "api/**"
       - "internal/**"
+      - "config/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile"
