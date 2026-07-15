@@ -29,12 +29,6 @@ var (
 	ErrResponseBodyTooLarge  = errors.New("response body too large")
 )
 
-// ValueStore is the executor-facing boundary for scenario state.
-type ValueStore interface {
-	Random(store string) (string, bool)
-	Put(store, value string) error
-}
-
 // ValueGenerator produces template values. It is injectable so executor tests
 // are deterministic without weakening production randomness.
 type ValueGenerator interface {
@@ -113,7 +107,7 @@ func (e *Executor) Execute(ctx context.Context, operation OperationConfig) (resu
 	result = ExecutionResult{Operation: operation.Name}
 	defer func() { result.Duration = time.Since(started) }()
 
-	values, err := e.resolveVariables(operation.Request.Variables)
+	values, err := e.resolveVariables(ctx, operation.Request.Variables)
 	if err != nil {
 		return result, fmt.Errorf("resolve variables for operation %q: %w", operation.Name, err)
 	}
@@ -160,7 +154,7 @@ func (e *Executor) Execute(ctx context.Context, operation OperationConfig) (resu
 		if err != nil {
 			return result, fmt.Errorf("capture operation %q response: %w", operation.Name, err)
 		}
-		if err := e.stores.Put(operation.Capture.Store, value); err != nil {
+		if err := e.stores.Put(ctx, operation.Capture.Store, value); err != nil {
 			return result, fmt.Errorf("capture operation %q into store %q: %w", operation.Name, operation.Capture.Store, err)
 		}
 		result.Captured = true
@@ -168,7 +162,7 @@ func (e *Executor) Execute(ctx context.Context, operation OperationConfig) (resu
 	return result, nil
 }
 
-func (e *Executor) resolveVariables(variables []VariableConfig) (map[string]string, error) {
+func (e *Executor) resolveVariables(ctx context.Context, variables []VariableConfig) (map[string]string, error) {
 	values := make(map[string]string, len(variables))
 	for _, variable := range variables {
 		var value string
@@ -183,7 +177,10 @@ func (e *Executor) resolveVariables(variables []VariableConfig) (map[string]stri
 				return nil, fmt.Errorf("%w: store %q is not configured", ErrStoreValueUnavailable, variable.Source.Store)
 			}
 			var ok bool
-			value, ok = e.stores.Random(variable.Source.Store)
+			value, ok, err = e.stores.Random(ctx, variable.Source.Store)
+			if err != nil {
+				return nil, fmt.Errorf("read store %q: %w", variable.Source.Store, err)
+			}
 			if !ok {
 				return nil, fmt.Errorf("%w: store %q is empty", ErrStoreValueUnavailable, variable.Source.Store)
 			}

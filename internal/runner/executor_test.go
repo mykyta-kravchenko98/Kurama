@@ -50,8 +50,8 @@ func TestExecutorPostCapturesShortURL(t *testing.T) {
 	if result.StatusCode != http.StatusOK || !result.Captured || result.Duration <= 0 {
 		t.Fatalf("result = %#v", result)
 	}
-	if got, ok := store.Random("hashes"); !ok || got != "abc123" {
-		t.Fatalf("captured hash = %q, %v", got, ok)
+	if got, ok, err := store.Random(context.Background(), "hashes"); err != nil || !ok || got != "abc123" {
+		t.Fatalf("captured hash = %q, %v, %v", got, ok, err)
 	}
 }
 
@@ -137,7 +137,7 @@ func TestExecutorEscapesPathVariable(t *testing.T) {
 	defer server.Close()
 
 	store := newFakeValueStore()
-	_ = store.Put("hashes", "a/b?c")
+	_ = store.Put(context.Background(), "hashes", "a/b?c")
 	executor := newTestExecutor(t, server, store)
 	_, err := executor.Execute(context.Background(), validConfig().Operations[1])
 	if err != nil {
@@ -187,17 +187,17 @@ func newFakeValueStore() *fakeValueStore {
 	return &fakeValueStore{values: map[string][]string{}}
 }
 
-func (s *fakeValueStore) Random(store string) (string, bool) {
+func (s *fakeValueStore) Random(_ context.Context, store string) (string, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	values := s.values[store]
 	if len(values) == 0 {
-		return "", false
+		return "", false, nil
 	}
-	return values[len(values)-1], true
+	return values[len(values)-1], true, nil
 }
 
-func (s *fakeValueStore) Put(store, value string) error {
+func (s *fakeValueStore) Put(_ context.Context, store, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.values[store] = append(s.values[store], value)
