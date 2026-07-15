@@ -8,10 +8,55 @@ type TargetSpec struct {
 	BaseURL string `json:"baseURL"`
 }
 
-// TrafficScenarioSpec is the desired runner lifecycle. Suspending a scenario
-// removes its runner Deployment without deleting the scenario configuration.
+type RateSpec struct {
+	RequestsPerMinute int `json:"requestsPerMinute"`
+}
+
+type StoreSpec struct {
+	Name     string `json:"name"`
+	Capacity int    `json:"capacity"`
+}
+
+type VariableSourceSpec struct {
+	Type   string `json:"type"`
+	Store  string `json:"store,omitempty"`
+	Length int    `json:"length,omitempty"`
+}
+
+type VariableSpec struct {
+	Name   string             `json:"name"`
+	Source VariableSourceSpec `json:"source"`
+}
+
+type RequestSpec struct {
+	Method       string            `json:"method"`
+	PathTemplate string            `json:"pathTemplate"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	BodyTemplate string            `json:"bodyTemplate,omitempty"`
+	Variables    []VariableSpec    `json:"variables,omitempty"`
+}
+
+type CaptureSpec struct {
+	JSONPointer string `json:"jsonPointer"`
+	Store       string `json:"store"`
+}
+
+type OperationSpec struct {
+	Name                string       `json:"name"`
+	Weight              int          `json:"weight"`
+	Request             RequestSpec  `json:"request"`
+	ExpectedStatusCodes []int        `json:"expectedStatusCodes"`
+	Capture             *CaptureSpec `json:"capture,omitempty"`
+}
+
+// TrafficScenarioSpec is the desired HTTP workload and runner lifecycle.
+// Suspending a scenario removes its runner Deployment without deleting its
+// configuration.
 type TrafficScenarioSpec struct {
-	Target TargetSpec `json:"target"`
+	Target     TargetSpec      `json:"target"`
+	Rate       RateSpec        `json:"rate"`
+	Stores     []StoreSpec     `json:"stores,omitempty"`
+	Operations []OperationSpec `json:"operations"`
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 }

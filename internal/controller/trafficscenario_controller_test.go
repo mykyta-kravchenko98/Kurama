@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
 func TestReconcileCreatesRunnerResources(t *testing.T) {
@@ -21,7 +23,7 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", Generation: 3},
-		Spec:       trafficv1alpha1.TrafficScenarioSpec{Target: trafficv1alpha1.TargetSpec{BaseURL: "http://shorturl.shorturl.svc.cluster.local"}},
+		Spec:       validScenarioSpec(),
 	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RunnerImagePullSecret: "registry-secret"}
@@ -35,8 +37,12 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if err := client.Get(ctx, key, &configMap); err != nil {
 		t.Fatalf("get ConfigMap: %v", err)
 	}
-	if got := configMap.Data["scenario.json"]; got != `{"target":{"baseURL":"http://shorturl.shorturl.svc.cluster.local"}}` {
-		t.Fatalf("scenario config = %s", got)
+	config, err := runner.DecodeConfig(strings.NewReader(configMap.Data["scenario.json"]))
+	if err != nil {
+		t.Fatalf("decode scenario config: %v", err)
+	}
+	if config.Rate.RequestsPerMinute != 30 || len(config.Stores) != 1 || len(config.Operations) != 3 {
+		t.Fatalf("scenario config = %#v", config)
 	}
 
 	var deployment appsv1.Deployment
@@ -49,6 +55,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-secret" {
 		t.Fatalf("runner imagePullSecrets = %#v", got)
 	}
+	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
+		t.Fatal("runner config hash annotation is empty")
+	}
 }
 
 func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
@@ -57,7 +66,7 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
-		Spec:       trafficv1alpha1.TrafficScenarioSpec{Target: trafficv1alpha1.TargetSpec{BaseURL: "https://shorturl.example.test"}, Suspend: true},
+		Spec:       trafficv1alpha1.TrafficScenarioSpec{Suspend: true},
 	}
 	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "")
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario, deployment).Build()
@@ -74,9 +83,58 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 
 func TestValidateScenarioRejectsNonHTTPURL(t *testing.T) {
 	t.Parallel()
-	scenario := &trafficv1alpha1.TrafficScenario{Spec: trafficv1alpha1.TrafficScenarioSpec{Target: trafficv1alpha1.TargetSpec{BaseURL: "postgres://db"}}}
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Target.BaseURL = "postgres://db"
 	if err := validateScenario(scenario); err == nil {
 		t.Fatal("validateScenario unexpectedly accepted postgres URL")
+	}
+}
+
+func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	before := desiredDeployment(scenario, "shorturl-runner", "image", "").Spec.Template.Annotations[configHashAnnotation]
+	scenario.Spec.Operations[0].Weight++
+	after := desiredDeployment(scenario, "shorturl-runner", "image", "").Spec.Template.Annotations[configHashAnnotation]
+	if before == after {
+		t.Fatal("config hash did not change after scenario update")
+	}
+}
+
+func validScenarioSpec() trafficv1alpha1.TrafficScenarioSpec {
+	return trafficv1alpha1.TrafficScenarioSpec{
+		Target: trafficv1alpha1.TargetSpec{BaseURL: "http://shorturl.shorturl.svc.cluster.local"},
+		Rate:   trafficv1alpha1.RateSpec{RequestsPerMinute: 30},
+		Stores: []trafficv1alpha1.StoreSpec{{Name: "hashes", Capacity: 10_000}},
+		Operations: []trafficv1alpha1.OperationSpec{
+			{
+				Name: "create", Weight: 20,
+				Request: trafficv1alpha1.RequestSpec{
+					Method: "POST", PathTemplate: "/api/v1/data/shorten",
+					Headers:      map[string]string{"Content-Type": "application/json"},
+					BodyTemplate: `{"longURL":"https://example.invalid/kurama/{{id}}"}`,
+					Variables:    []trafficv1alpha1.VariableSpec{{Name: "id", Source: trafficv1alpha1.VariableSourceSpec{Type: "randomUUID"}}},
+				},
+				ExpectedStatusCodes: []int{200},
+				Capture:             &trafficv1alpha1.CaptureSpec{JSONPointer: "/shortURL", Store: "hashes"},
+			},
+			{
+				Name: "resolve-valid", Weight: 70,
+				Request: trafficv1alpha1.RequestSpec{
+					Method: "GET", PathTemplate: "/api/v1/{{hash}}",
+					Variables: []trafficv1alpha1.VariableSpec{{Name: "hash", Source: trafficv1alpha1.VariableSourceSpec{Type: "store", Store: "hashes"}}},
+				},
+				ExpectedStatusCodes: []int{308},
+			},
+			{
+				Name: "resolve-invalid", Weight: 10,
+				Request: trafficv1alpha1.RequestSpec{
+					Method: "GET", PathTemplate: "/api/v1/{{hash}}",
+					Variables: []trafficv1alpha1.VariableSpec{{Name: "hash", Source: trafficv1alpha1.VariableSourceSpec{Type: "randomBase62", Length: 8}}},
+				},
+				ExpectedStatusCodes: []int{404},
+			},
+		},
 	}
 }
 

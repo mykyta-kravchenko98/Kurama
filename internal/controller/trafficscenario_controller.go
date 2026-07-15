@@ -3,9 +3,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"net/url"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,11 +19,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
 const (
-	componentLabel = "app.kubernetes.io/component"
-	scenarioLabel  = "traffic.kurama.dev/scenario"
+	componentLabel       = "app.kubernetes.io/component"
+	scenarioLabel        = "traffic.kurama.dev/scenario"
+	configHashAnnotation = "traffic.kurama.dev/config-hash"
 )
 
 // TrafficScenarioReconciler turns every active scenario into exactly one
@@ -47,13 +49,6 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if err := validateScenario(&scenario); err != nil {
-		return r.failed(ctx, &scenario, err)
-	}
-	if r.RunnerImage == "" {
-		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"))
-	}
-
 	name := runnerName(scenario.Name)
 	if scenario.Spec.Suspend {
 		var deployment appsv1.Deployment
@@ -67,6 +62,12 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 		}
 		return r.succeeded(ctx, &scenario, trafficv1alpha1.PhaseSuspended)
+	}
+	if err := validateScenario(&scenario); err != nil {
+		return r.failed(ctx, &scenario, err)
+	}
+	if r.RunnerImage == "" {
+		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"))
 	}
 
 	configMap := desiredConfigMap(&scenario, name)
@@ -89,23 +90,17 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
-	parsed, err := url.ParseRequestURI(scenario.Spec.Target.BaseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("spec.target.baseURL must be an absolute HTTP(S) URL")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("spec.target.baseURL scheme %q is unsupported; use http or https", parsed.Scheme)
+	if err := scenarioRunnerConfig(scenario).Validate(); err != nil {
+		return fmt.Errorf("spec: %w", err)
 	}
 	return nil
 }
 
 func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *corev1.ConfigMap {
-	config, _ := json.Marshal(struct {
-		Target trafficv1alpha1.TargetSpec `json:"target"`
-	}{Target: scenario.Spec.Target})
+	config := scenarioConfigJSON(scenario)
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels(scenario)},
-		Data:       map[string]string{"scenario.json": string(config)},
+		Data:       map[string]string{"scenario.json": config},
 	}
 }
 
@@ -129,11 +124,69 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 			Replicas: ptr.To[int32](1),
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec:       podSpec,
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						configHashAnnotation: configHash(scenarioConfigJSON(scenario)),
+					},
+				},
+				Spec: podSpec,
 			},
 		},
 	}
+}
+
+func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Config {
+	config := runner.Config{
+		Target:     runner.TargetConfig{BaseURL: scenario.Spec.Target.BaseURL},
+		Rate:       runner.RateConfig{RequestsPerMinute: scenario.Spec.Rate.RequestsPerMinute},
+		Stores:     make([]runner.StoreConfig, len(scenario.Spec.Stores)),
+		Operations: make([]runner.OperationConfig, len(scenario.Spec.Operations)),
+	}
+	for i, store := range scenario.Spec.Stores {
+		config.Stores[i] = runner.StoreConfig{Name: store.Name, Capacity: store.Capacity}
+	}
+	for i, operation := range scenario.Spec.Operations {
+		converted := runner.OperationConfig{
+			Name:   operation.Name,
+			Weight: operation.Weight,
+			Request: runner.RequestConfig{
+				Method:       operation.Request.Method,
+				PathTemplate: operation.Request.PathTemplate,
+				Headers:      operation.Request.Headers,
+				BodyTemplate: operation.Request.BodyTemplate,
+				Variables:    make([]runner.VariableConfig, len(operation.Request.Variables)),
+			},
+			ExpectedStatusCodes: operation.ExpectedStatusCodes,
+		}
+		for j, variable := range operation.Request.Variables {
+			converted.Request.Variables[j] = runner.VariableConfig{
+				Name: variable.Name,
+				Source: runner.VariableSource{
+					Type:   variable.Source.Type,
+					Store:  variable.Source.Store,
+					Length: variable.Source.Length,
+				},
+			}
+		}
+		if operation.Capture != nil {
+			converted.Capture = &runner.CaptureConfig{
+				JSONPointer: operation.Capture.JSONPointer,
+				Store:       operation.Capture.Store,
+			}
+		}
+		config.Operations[i] = converted
+	}
+	return config
+}
+
+func scenarioConfigJSON(scenario *trafficv1alpha1.TrafficScenario) string {
+	data, _ := json.Marshal(scenarioRunnerConfig(scenario))
+	return string(data)
+}
+
+func configHash(config string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(config)))
 }
 
 func (r *TrafficScenarioReconciler) applyConfigMap(ctx context.Context, desired *corev1.ConfigMap) error {
