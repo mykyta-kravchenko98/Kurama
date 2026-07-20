@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
+
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
@@ -65,6 +67,78 @@ func TestLoadConfigReportsMissingFile(t *testing.T) {
 	t.Parallel()
 	if _, err := loadConfig(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("loadConfig() error = nil")
+	}
+}
+
+func TestNewValueStoreDefaultsToMemory(t *testing.T) {
+	t.Parallel()
+
+	store, err := newValueStore(context.Background(), storeSettings{}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newValueStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+	if err := store.Put(context.Background(), "hashes", "memory-value"); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	if value, ok, err := store.Random(context.Background(), "hashes"); err != nil || !ok || value != "memory-value" {
+		t.Fatalf("Random() = (%q, %t, %v), want memory-value, true, nil", value, ok, err)
+	}
+}
+
+func TestNewValueStoreCreatesRedisBackend(t *testing.T) {
+	t.Parallel()
+
+	server := miniredis.RunT(t)
+	store, err := newValueStore(context.Background(), storeSettings{
+		Backend:      "redis",
+		RedisAddress: server.Addr(),
+		Namespace:    "shorturl",
+		Scenario:     "load",
+	}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newValueStore() error = %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+	if err := store.Put(context.Background(), "hashes", "redis-value"); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	values, err := server.List("kurama:v1:shorturl:load:hashes")
+	if err != nil {
+		t.Fatalf("read Redis list: %v", err)
+	}
+	if len(values) != 1 || values[0] != "redis-value" {
+		t.Fatalf("Redis values = %v, want [redis-value]", values)
+	}
+}
+
+func TestNewValueStoreRejectsInvalidBackendSettings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings storeSettings
+	}{
+		{name: "unknown backend", settings: storeSettings{Backend: "postgres"}},
+		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}},
+		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}},
+		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := newValueStore(context.Background(), test.settings, nil); err == nil {
+				t.Fatal("newValueStore() error = nil")
+			}
+		})
 	}
 }
 

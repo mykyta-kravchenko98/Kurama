@@ -3,16 +3,41 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
-const scenarioConfigPath = "/etc/kurama/scenario.json"
+const (
+	scenarioConfigPath = "/etc/kurama/scenario.json"
+	storeBackendEnv    = "KURAMA_STORE_BACKEND"
+	redisAddressEnv    = "KURAMA_REDIS_ADDR"
+	namespaceEnv       = "KURAMA_NAMESPACE"
+	scenarioEnv        = "KURAMA_SCENARIO"
+)
+
+type storeSettings struct {
+	Backend      string
+	RedisAddress string
+	Namespace    string
+	Scenario     string
+}
+
+type valueStoreHandle struct {
+	runner.ValueStore
+	close func() error
+}
+
+func (h *valueStoreHandle) Close() error {
+	return h.close()
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -24,15 +49,21 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, configPath string, schedulerOptions ...runner.SchedulerOption) error {
+func run(ctx context.Context, configPath string, schedulerOptions ...runner.SchedulerOption) (runErr error) {
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
-	stores, err := runner.NewMemoryStore(config.Stores)
+	settings := storeSettingsFromEnv()
+	stores, err := newValueStore(ctx, settings, config.Stores)
 	if err != nil {
 		return fmt.Errorf("create value store: %w", err)
 	}
+	defer func() {
+		if err := stores.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close value store: %w", err))
+		}
+	}()
 	executor, err := runner.NewExecutor(config.Target, stores)
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
@@ -44,6 +75,7 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 
 	slog.Info("Kurama runner ready",
 		"config", configPath,
+		"storeBackend", normalizedStoreBackend(settings.Backend),
 		"target", config.Target.BaseURL,
 		"requestsPerMinute", config.Rate.RequestsPerMinute,
 		"operations", len(config.Operations),
@@ -52,6 +84,59 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 	scheduler.Run(ctx)
 	slog.Info("Kurama runner stopping")
 	return nil
+}
+
+func storeSettingsFromEnv() storeSettings {
+	return storeSettings{
+		Backend:      os.Getenv(storeBackendEnv),
+		RedisAddress: os.Getenv(redisAddressEnv),
+		Namespace:    os.Getenv(namespaceEnv),
+		Scenario:     os.Getenv(scenarioEnv),
+	}
+}
+
+func newValueStore(ctx context.Context, settings storeSettings, configs []runner.StoreConfig) (*valueStoreHandle, error) {
+	switch normalizedStoreBackend(settings.Backend) {
+	case "memory":
+		store, err := runner.NewMemoryStore(configs)
+		if err != nil {
+			return nil, err
+		}
+		return &valueStoreHandle{ValueStore: store, close: func() error { return nil }}, nil
+	case "redis":
+		if settings.RedisAddress == "" {
+			return nil, fmt.Errorf("%s must be set for Redis storage", redisAddressEnv)
+		}
+		if settings.Namespace == "" {
+			return nil, fmt.Errorf("%s must be set for Redis storage", namespaceEnv)
+		}
+		if settings.Scenario == "" {
+			return nil, fmt.Errorf("%s must be set for Redis storage", scenarioEnv)
+		}
+		client := redis.NewClient(&redis.Options{Addr: settings.RedisAddress})
+		if err := client.Ping(ctx).Err(); err != nil {
+			closeErr := client.Close()
+			return nil, errors.Join(fmt.Errorf("ping Redis: %w", err), closeErr)
+		}
+		store, err := runner.NewRedisStore(client, runner.RedisStoreScope{
+			Namespace: settings.Namespace,
+			Scenario:  settings.Scenario,
+		}, configs)
+		if err != nil {
+			closeErr := client.Close()
+			return nil, errors.Join(err, closeErr)
+		}
+		return &valueStoreHandle{ValueStore: store, close: client.Close}, nil
+	default:
+		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", storeBackendEnv, settings.Backend)
+	}
+}
+
+func normalizedStoreBackend(backend string) string {
+	if backend == "" {
+		return "memory"
+	}
+	return backend
 }
 
 func loadConfig(path string) (runner.Config, error) {
