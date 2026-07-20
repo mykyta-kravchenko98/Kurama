@@ -36,6 +36,7 @@ type TrafficScenarioReconciler struct {
 	Scheme                *runtime.Scheme
 	RunnerImage           string
 	RunnerImagePullSecret string
+	RedisAddress          string
 }
 
 // +kubebuilder:rbac:groups=traffic.kurama.dev,resources=trafficscenarios,verbs=get;list;watch
@@ -69,6 +70,9 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if r.RunnerImage == "" {
 		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"))
 	}
+	if storageBackend(&scenario) == string(trafficv1alpha1.StorageTypeRedis) && r.RedisAddress == "" {
+		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing %s", runner.RedisAddressEnv))
+	}
 
 	configMap := desiredConfigMap(&scenario, name)
 	if err := controllerutil.SetControllerReference(&scenario, configMap, r.Scheme); err != nil {
@@ -78,7 +82,7 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return r.failed(ctx, &scenario, err)
 	}
 
-	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret)
+	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret, r.RedisAddress)
 	if err := controllerutil.SetControllerReference(&scenario, deployment, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("set Deployment owner: %w", err)
 	}
@@ -90,6 +94,13 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
+	if scenario.Spec.Storage != nil {
+		switch scenario.Spec.Storage.Type {
+		case "", trafficv1alpha1.StorageTypeMemory, trafficv1alpha1.StorageTypeRedis:
+		default:
+			return fmt.Errorf("spec.storage.type %q is unsupported; use memory or redis", scenario.Spec.Storage.Type)
+		}
+	}
 	if err := scenarioRunnerConfig(scenario).Validate(); err != nil {
 		return fmt.Errorf("spec: %w", err)
 	}
@@ -104,13 +115,14 @@ func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *c
 	}
 }
 
-func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, imagePullSecret string) *appsv1.Deployment {
+func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, imagePullSecret, redisAddress string) *appsv1.Deployment {
 	labels := labels(scenario)
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
 			Name:         "runner",
 			Image:        image,
 			Command:      []string{"/app/runner"},
+			Env:          runnerEnvironment(scenario, redisAddress),
 			VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
 		}},
 		Volumes: []corev1.Volume{{Name: "scenario", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
@@ -134,6 +146,31 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 			},
 		},
 	}
+}
+
+func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress string) []corev1.EnvVar {
+	backend := storageBackend(scenario)
+	environment := []corev1.EnvVar{{Name: runner.StoreBackendEnv, Value: backend}}
+	if backend != string(trafficv1alpha1.StorageTypeRedis) {
+		return environment
+	}
+	return append(environment,
+		corev1.EnvVar{Name: runner.RedisAddressEnv, Value: redisAddress},
+		corev1.EnvVar{
+			Name: runner.NamespaceEnv,
+			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.namespace",
+			}},
+		},
+		corev1.EnvVar{Name: runner.ScenarioEnv, Value: scenario.Name},
+	)
+}
+
+func storageBackend(scenario *trafficv1alpha1.TrafficScenario) string {
+	if scenario.Spec.Storage == nil || scenario.Spec.Storage.Type == "" {
+		return string(trafficv1alpha1.StorageTypeMemory)
+	}
+	return string(scenario.Spec.Storage.Type)
 }
 
 func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Config {

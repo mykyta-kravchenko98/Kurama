@@ -15,13 +15,7 @@ import (
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
-const (
-	scenarioConfigPath = "/etc/kurama/scenario.json"
-	storeBackendEnv    = "KURAMA_STORE_BACKEND"
-	redisAddressEnv    = "KURAMA_REDIS_ADDR"
-	namespaceEnv       = "KURAMA_NAMESPACE"
-	scenarioEnv        = "KURAMA_SCENARIO"
-)
+const scenarioConfigPath = "/etc/kurama/scenario.json"
 
 type storeSettings struct {
 	Backend      string
@@ -88,10 +82,10 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 
 func storeSettingsFromEnv() storeSettings {
 	return storeSettings{
-		Backend:      os.Getenv(storeBackendEnv),
-		RedisAddress: os.Getenv(redisAddressEnv),
-		Namespace:    os.Getenv(namespaceEnv),
-		Scenario:     os.Getenv(scenarioEnv),
+		Backend:      os.Getenv(runner.StoreBackendEnv),
+		RedisAddress: os.Getenv(runner.RedisAddressEnv),
+		Namespace:    os.Getenv(runner.NamespaceEnv),
+		Scenario:     os.Getenv(runner.ScenarioEnv),
 	}
 }
 
@@ -105,13 +99,13 @@ func newValueStore(ctx context.Context, settings storeSettings, configs []runner
 		return &valueStoreHandle{ValueStore: store, close: func() error { return nil }}, nil
 	case "redis":
 		if settings.RedisAddress == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", redisAddressEnv)
+			return nil, fmt.Errorf("%s must be set for Redis storage", runner.RedisAddressEnv)
 		}
 		if settings.Namespace == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", namespaceEnv)
+			return nil, fmt.Errorf("%s must be set for Redis storage", runner.NamespaceEnv)
 		}
 		if settings.Scenario == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", scenarioEnv)
+			return nil, fmt.Errorf("%s must be set for Redis storage", runner.ScenarioEnv)
 		}
 		client := redis.NewClient(&redis.Options{Addr: settings.RedisAddress})
 		if err := client.Ping(ctx).Err(); err != nil {
@@ -128,7 +122,7 @@ func newValueStore(ctx context.Context, settings storeSettings, configs []runner
 		}
 		return &valueStoreHandle{ValueStore: store, close: client.Close}, nil
 	default:
-		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", storeBackendEnv, settings.Backend)
+		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", runner.StoreBackendEnv, settings.Backend)
 	}
 }
 

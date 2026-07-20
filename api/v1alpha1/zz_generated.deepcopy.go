@@ -68,6 +68,15 @@ func (in *StoreSpec) DeepCopy() *StoreSpec {
 	in.DeepCopyInto(out)
 	return out
 }
+func (in *StorageSpec) DeepCopyInto(out *StorageSpec) { *out = *in }
+func (in *StorageSpec) DeepCopy() *StorageSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(StorageSpec)
+	in.DeepCopyInto(out)
+	return out
+}
 func (in *TargetSpec) DeepCopyInto(out *TargetSpec) { *out = *in }
 func (in *TargetSpec) DeepCopy() *TargetSpec {
 	if in == nil {
@@ -79,6 +88,9 @@ func (in *TargetSpec) DeepCopy() *TargetSpec {
 }
 func (in *TrafficScenarioSpec) DeepCopyInto(out *TrafficScenarioSpec) {
 	*out = *in
+	if in.Storage != nil {
+		out.Storage = in.Storage.DeepCopy()
+	}
 	if in.Stores != nil {
 		out.Stores = append([]StoreSpec(nil), in.Stores...)
 	}

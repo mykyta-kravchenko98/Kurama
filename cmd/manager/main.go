@@ -12,6 +12,7 @@ import (
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 	"github.com/mykyta-kravchenko98/Kurama/internal/controller"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
 var scheme = runtime.NewScheme()
@@ -55,6 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 	runnerImagePullSecret := os.Getenv("KURAMA_RUNNER_IMAGE_PULL_SECRET")
+	redisAddress := os.Getenv(runner.RedisAddressEnv)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -72,6 +74,7 @@ func main() {
 		Scheme:                mgr.GetScheme(),
 		RunnerImage:           runnerImage,
 		RunnerImagePullSecret: runnerImagePullSecret,
+		RedisAddress:          redisAddress,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to set up TrafficScenario controller")

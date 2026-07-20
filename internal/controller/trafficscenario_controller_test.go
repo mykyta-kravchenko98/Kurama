@@ -55,8 +55,77 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if got := deployment.Spec.Template.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-secret" {
 		t.Fatalf("runner imagePullSecrets = %#v", got)
 	}
+	if got := envValue(deployment.Spec.Template.Spec.Containers[0].Env, runner.StoreBackendEnv); got != "memory" {
+		t.Fatalf("runner store backend = %q, want memory", got)
+	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
+	}
+}
+
+func TestReconcileCreatesRedisRunnerEnvironment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: trafficv1alpha1.StorageTypeRedis}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client:       client,
+		Scheme:       scheme,
+		RunnerImage:  "example.test/kurama:test",
+		RedisAddress: "kurama-redis:6379",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	key := types.NamespacedName{Namespace: "shorturl", Name: "shorturl-runner"}
+	if err := client.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	environment := deployment.Spec.Template.Spec.Containers[0].Env
+	if got := envValue(environment, runner.StoreBackendEnv); got != "redis" {
+		t.Fatalf("runner store backend = %q, want redis", got)
+	}
+	if got := envValue(environment, runner.RedisAddressEnv); got != "kurama-redis:6379" {
+		t.Fatalf("runner Redis address = %q", got)
+	}
+	if got := envValue(environment, runner.ScenarioEnv); got != "shorturl" {
+		t.Fatalf("runner scenario = %q", got)
+	}
+	namespace := envVar(environment, runner.NamespaceEnv)
+	if namespace == nil || namespace.ValueFrom == nil || namespace.ValueFrom.FieldRef == nil || namespace.ValueFrom.FieldRef.FieldPath != "metadata.namespace" {
+		t.Fatalf("runner namespace env = %#v", namespace)
+	}
+}
+
+func TestReconcileRejectsRedisWithoutControllerAddress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: trafficv1alpha1.StorageTypeRedis}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
+	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err == nil {
+		t.Fatal("reconcile error = nil")
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "shorturl", Name: "shorturl"}, &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseFailed || !strings.Contains(actual.Status.Message, runner.RedisAddressEnv) {
+		t.Fatalf("scenario status = %#v", actual.Status)
 	}
 }
 
@@ -68,7 +137,7 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
 		Spec:       trafficv1alpha1.TrafficScenarioSpec{Suspend: true},
 	}
-	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "")
+	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "", "")
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario, deployment).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
 
@@ -90,12 +159,21 @@ func TestValidateScenarioRejectsNonHTTPURL(t *testing.T) {
 	}
 }
 
+func TestValidateScenarioRejectsUnknownStorageType(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: "postgres"}
+	if err := validateScenario(scenario); err == nil {
+		t.Fatal("validateScenario unexpectedly accepted unknown storage type")
+	}
+}
+
 func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
 	t.Parallel()
 	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
-	before := desiredDeployment(scenario, "shorturl-runner", "image", "").Spec.Template.Annotations[configHashAnnotation]
+	before := desiredDeployment(scenario, "shorturl-runner", "image", "", "").Spec.Template.Annotations[configHashAnnotation]
 	scenario.Spec.Operations[0].Weight++
-	after := desiredDeployment(scenario, "shorturl-runner", "image", "").Spec.Template.Annotations[configHashAnnotation]
+	after := desiredDeployment(scenario, "shorturl-runner", "image", "", "").Spec.Template.Annotations[configHashAnnotation]
 	if before == after {
 		t.Fatal("config hash did not change after scenario update")
 	}
@@ -155,4 +233,21 @@ func newScheme(t *testing.T) *runtime.Scheme {
 
 func requestFor(scenario *trafficv1alpha1.TrafficScenario) ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: scenario.Namespace, Name: scenario.Name}}
+}
+
+func envValue(environment []corev1.EnvVar, name string) string {
+	variable := envVar(environment, name)
+	if variable == nil {
+		return ""
+	}
+	return variable.Value
+}
+
+func envVar(environment []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range environment {
+		if environment[i].Name == name {
+			return &environment[i]
+		}
+	}
+	return nil
 }
