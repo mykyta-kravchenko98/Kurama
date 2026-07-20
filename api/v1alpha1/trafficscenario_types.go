@@ -17,6 +17,21 @@ type StoreSpec struct {
 	Capacity int    `json:"capacity"`
 }
 
+type StorageType string
+
+const (
+	StorageTypeMemory StorageType = "memory"
+	StorageTypeRedis  StorageType = "redis"
+)
+
+type StorageSpec struct {
+	// Type selects the backend shared by all declared stores. An omitted value
+	// preserves the in-memory backend used by existing scenarios.
+	// +kubebuilder:validation:Enum=memory;redis
+	// +optional
+	Type StorageType `json:"type,omitempty"`
+}
+
 type VariableSourceSpec struct {
 	Type   string `json:"type"`
 	Store  string `json:"store,omitempty"`
@@ -57,6 +72,8 @@ type TrafficScenarioSpec struct {
 	Rate       RateSpec        `json:"rate"`
 	Stores     []StoreSpec     `json:"stores,omitempty"`
 	Operations []OperationSpec `json:"operations"`
+	// +optional
+	Storage *StorageSpec `json:"storage,omitempty"`
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 }
