@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
@@ -39,7 +43,7 @@ func TestRunExecutesConfiguredWorkload(t *testing.T) {
 		}},
 	}
 	path := writeTestConfig(t, config)
-	if err := run(ctx, path, runner.WithExecutionHandler(func(result runner.ExecutionResult, err error) {
+	if err := runWithMetricsAddress(ctx, path, "127.0.0.1:0", runner.WithExecutionHandler(func(result runner.ExecutionResult, err error) {
 		if err != nil || result.StatusCode != http.StatusOK {
 			t.Errorf("execution result = %#v, error = %v", result, err)
 		}
@@ -139,6 +143,57 @@ func TestNewValueStoreRejectsInvalidBackendSettings(t *testing.T) {
 				t.Fatal("newValueStore() error = nil")
 			}
 		})
+	}
+}
+
+func TestMetricsServerExportsStoreMetricsAndShutsDown(t *testing.T) {
+	t.Parallel()
+
+	registry := prometheus.NewRegistry()
+	observer, err := runner.NewPrometheusStoreObserver(registry)
+	if err != nil {
+		t.Fatalf("NewPrometheusStoreObserver() error = %v", err)
+	}
+	underlying, err := runner.NewMemoryStore([]runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("NewMemoryStore() error = %v", err)
+	}
+	store, err := runner.NewInstrumentedStore(underlying, "memory", observer)
+	if err != nil {
+		t.Fatalf("NewInstrumentedStore() error = %v", err)
+	}
+	if err := store.Put(context.Background(), "hashes", "value"); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	server, err := startMetricsServer("127.0.0.1:0", registry)
+	if err != nil {
+		t.Fatalf("startMetricsServer() error = %v", err)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get("http://" + server.address + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read /metrics response: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close /metrics response: %v", closeErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d", response.StatusCode)
+	}
+	if !strings.Contains(string(body), `kurama_store_operations_total{backend="memory",operation="put",result="success",store="hashes"} 1`) {
+		t.Fatalf("/metrics response does not contain store counter:\n%s", body)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
 	}
 }
 

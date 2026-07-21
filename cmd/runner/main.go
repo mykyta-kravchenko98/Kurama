@@ -6,16 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
-const scenarioConfigPath = "/etc/kurama/scenario.json"
+const (
+	scenarioConfigPath     = "/etc/kurama/scenario.json"
+	defaultMetricsAddress  = ":8080"
+	metricsShutdownTimeout = 5 * time.Second
+)
 
 type storeSettings struct {
 	Backend      string
@@ -27,6 +36,12 @@ type storeSettings struct {
 type valueStoreHandle struct {
 	runner.ValueStore
 	close func() error
+}
+
+type metricsServer struct {
+	server  *http.Server
+	address string
+	done    <-chan error
 }
 
 func (h *valueStoreHandle) Close() error {
@@ -44,6 +59,15 @@ func main() {
 }
 
 func run(ctx context.Context, configPath string, schedulerOptions ...runner.SchedulerOption) (runErr error) {
+	return runWithMetricsAddress(ctx, configPath, metricsAddressFromEnv(), schedulerOptions...)
+}
+
+func runWithMetricsAddress(
+	ctx context.Context,
+	configPath string,
+	metricsAddress string,
+	schedulerOptions ...runner.SchedulerOption,
+) (runErr error) {
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -58,6 +82,20 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 			runErr = errors.Join(runErr, fmt.Errorf("close value store: %w", err))
 		}
 	}()
+	registry := prometheus.NewRegistry()
+	observer, err := runner.NewPrometheusStoreObserver(registry)
+	if err != nil {
+		return fmt.Errorf("create store metrics observer: %w", err)
+	}
+	instrumentedStore, err := runner.NewInstrumentedStore(
+		stores.ValueStore,
+		normalizedStoreBackend(settings.Backend),
+		observer,
+	)
+	if err != nil {
+		return fmt.Errorf("instrument value store: %w", err)
+	}
+	stores.ValueStore = instrumentedStore
 	executor, err := runner.NewExecutor(config.Target, stores)
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
@@ -66,9 +104,21 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
+	metrics, err := startMetricsServer(metricsAddress, registry)
+	if err != nil {
+		return fmt.Errorf("start metrics server: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("stop metrics server: %w", err))
+		}
+	}()
 
 	slog.Info("Kurama runner ready",
 		"config", configPath,
+		"metricsAddress", metricsAddress,
 		"storeBackend", normalizedStoreBackend(settings.Backend),
 		"target", config.Target.BaseURL,
 		"requestsPerMinute", config.Rate.RequestsPerMinute,
@@ -78,6 +128,44 @@ func run(ctx context.Context, configPath string, schedulerOptions ...runner.Sche
 	scheduler.Run(ctx)
 	slog.Info("Kurama runner stopping")
 	return nil
+}
+
+func metricsAddressFromEnv() string {
+	if address := os.Getenv(runner.MetricsAddrEnv); address != "" {
+		return address
+	}
+	return defaultMetricsAddress
+}
+
+func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsServer, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %q: %w", address, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve(listener)
+	}()
+	return &metricsServer{server: server, address: listener.Addr().String(), done: done}, nil
+}
+
+func (s *metricsServer) Shutdown(ctx context.Context) error {
+	shutdownErr := s.server.Shutdown(ctx)
+	var closeErr error
+	if shutdownErr != nil {
+		closeErr = s.server.Close()
+	}
+	serveErr := <-s.done
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(shutdownErr, closeErr, serveErr)
 }
 
 func storeSettingsFromEnv() storeSettings {
