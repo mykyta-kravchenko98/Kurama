@@ -124,6 +124,11 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 			Command:      []string{"/app/runner"},
 			Env:          runnerEnvironment(scenario, redisAddress),
 			VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
+			Ports: []corev1.ContainerPort{{
+				Name:          "metrics",
+				ContainerPort: 8080,
+				Protocol:      corev1.ProtocolTCP,
+			}},
 		}},
 		Volumes: []corev1.Volume{{Name: "scenario", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
 	}
@@ -139,7 +144,10 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
 					Annotations: map[string]string{
-						configHashAnnotation: configHash(scenarioConfigJSON(scenario)),
+						configHashAnnotation:   configHash(scenarioConfigJSON(scenario)),
+						"prometheus.io/scrape": "true",
+						"prometheus.io/port":   "8080",
+						"prometheus.io/path":   "/metrics",
 					},
 				},
 				Spec: podSpec,

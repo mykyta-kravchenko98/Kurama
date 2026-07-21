@@ -49,14 +49,33 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if err := client.Get(ctx, key, &deployment); err != nil {
 		t.Fatalf("get Deployment: %v", err)
 	}
-	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "example.test/kurama:test" {
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if got := container.Image; got != "example.test/kurama:test" {
 		t.Fatalf("runner image = %q", got)
 	}
 	if got := deployment.Spec.Template.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-secret" {
 		t.Fatalf("runner imagePullSecrets = %#v", got)
 	}
-	if got := envValue(deployment.Spec.Template.Spec.Containers[0].Env, runner.StoreBackendEnv); got != "memory" {
+	if got := envValue(container.Env, runner.StoreBackendEnv); got != "memory" {
 		t.Fatalf("runner store backend = %q, want memory", got)
+	}
+	if len(container.Ports) != 1 {
+		t.Fatalf("runner ports = %#v, want one metrics port", container.Ports)
+	}
+	metricsPort := container.Ports[0]
+	if metricsPort.Name != "metrics" || metricsPort.ContainerPort != 8080 || metricsPort.Protocol != corev1.ProtocolTCP {
+		t.Fatalf("runner metrics port = %#v", metricsPort)
+	}
+	annotations := deployment.Spec.Template.Annotations
+	wantAnnotations := map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   "8080",
+		"prometheus.io/path":   "/metrics",
+	}
+	for name, want := range wantAnnotations {
+		if got := annotations[name]; got != want {
+			t.Errorf("runner annotation %q = %q, want %q", name, got, want)
+		}
 	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
