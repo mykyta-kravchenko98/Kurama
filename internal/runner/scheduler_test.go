@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
 )
 
 func TestPickWeightedUsesCumulativeWeightRanges(t *testing.T) {
@@ -53,6 +55,41 @@ func TestSchedulerDoesNotRetryOrdinaryExecutionError(t *testing.T) {
 	scheduler.executeSlot(context.Background())
 	if got := executor.operationNames(); len(got) != 1 || got[0] != "create" {
 		t.Fatalf("executed operations = %v", got)
+	}
+}
+
+func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		decision       ratelimit.Decision
+		limiterErr     error
+		wantExecutions int
+	}{
+		{name: "allowed", decision: ratelimit.Decision{Allowed: true}, wantExecutions: 1},
+		{name: "rejected"},
+		{name: "limiter error", limiterErr: errors.New("redis unavailable")},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			executor := &recordingExecutor{}
+			limiter := &recordingRateLimiter{decision: test.decision, err: test.limiterErr}
+			scheduler := newTestScheduler(t, executor, WithRateLimiter(limiter))
+
+			scheduler.executeSlot(context.Background())
+			if got := len(executor.operationNames()); got != test.wantExecutions {
+				t.Fatalf("executions = %d; want %d", got, test.wantExecutions)
+			}
+			if limiter.calls != 1 {
+				t.Fatalf("limiter calls = %d; want 1", limiter.calls)
+			}
+			wantLimit := ratelimit.Limit{Requests: 30, Window: time.Minute}
+			if limiter.limit != wantLimit {
+				t.Fatalf("limit = %#v; want %#v", limiter.limit, wantLimit)
+			}
+		})
 	}
 }
 
@@ -165,6 +202,19 @@ func newTestScheduler(t *testing.T, executor OperationExecutor, options ...Sched
 type sequenceRandomSource struct {
 	values []int
 	next   int
+}
+
+type recordingRateLimiter struct {
+	decision ratelimit.Decision
+	err      error
+	limit    ratelimit.Limit
+	calls    int
+}
+
+func (l *recordingRateLimiter) TryAcquire(_ context.Context, limit ratelimit.Limit) (ratelimit.Decision, error) {
+	l.calls++
+	l.limit = limit
+	return l.decision, l.err
 }
 
 func (s *sequenceRandomSource) IntN(n int) int {
