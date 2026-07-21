@@ -166,7 +166,7 @@ func assertLimiterAllowsOneRequest(t *testing.T, limiter ratelimit.Limiter) {
 	}
 }
 
-func TestMetricsServerExportsStoreMetricsAndShutsDown(t *testing.T) {
+func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	t.Parallel()
 
 	registry := prometheus.NewRegistry()
@@ -184,6 +184,17 @@ func TestMetricsServerExportsStoreMetricsAndShutsDown(t *testing.T) {
 	}
 	if err := store.Put(context.Background(), "hashes", "value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
+	}
+	limiterObserver, err := ratelimit.NewPrometheusObserver(registry)
+	if err != nil {
+		t.Fatalf("NewPrometheusObserver() error = %v", err)
+	}
+	limiter, err := ratelimit.NewInstrumentedLimiter(ratelimit.NewLocalLimiter(), "memory", limiterObserver)
+	if err != nil {
+		t.Fatalf("NewInstrumentedLimiter() error = %v", err)
+	}
+	if _, err := limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute}); err != nil {
+		t.Fatalf("TryAcquire() error = %v", err)
 	}
 
 	server, err := startMetricsServer("127.0.0.1:0", registry)
@@ -208,6 +219,9 @@ func TestMetricsServerExportsStoreMetricsAndShutsDown(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `kurama_store_operations_total{backend="memory",operation="put",result="success",store="hashes"} 1`) {
 		t.Fatalf("/metrics response does not contain store counter:\n%s", body)
+	}
+	if !strings.Contains(string(body), `kurama_rate_limiter_acquisitions_total{backend="memory",result="allowed"} 1`) {
+		t.Fatalf("/metrics response does not contain rate limiter counter:\n%s", body)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)

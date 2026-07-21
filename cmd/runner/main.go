@@ -98,6 +98,19 @@ func runWithMetricsAddress(
 		return fmt.Errorf("instrument value store: %w", err)
 	}
 	state.ValueStore = instrumentedStore
+	limiterObserver, err := ratelimit.NewPrometheusObserver(registry)
+	if err != nil {
+		return fmt.Errorf("create rate limiter metrics observer: %w", err)
+	}
+	instrumentedLimiter, err := ratelimit.NewInstrumentedLimiter(
+		state.Limiter,
+		normalizedStoreBackend(settings.Backend),
+		limiterObserver,
+	)
+	if err != nil {
+		return fmt.Errorf("instrument rate limiter: %w", err)
+	}
+	state.Limiter = instrumentedLimiter
 	executor, err := runner.NewExecutor(config.Target, state)
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
