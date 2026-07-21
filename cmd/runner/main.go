@@ -102,7 +102,10 @@ func runWithMetricsAddress(
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
 	}
-	scheduler, err := runner.NewScheduler(config.Rate, config.Operations, executor, schedulerOptions...)
+	options := make([]runner.SchedulerOption, 0, len(schedulerOptions)+1)
+	options = append(options, runner.WithRateLimiter(state.Limiter))
+	options = append(options, schedulerOptions...)
+	scheduler, err := runner.NewScheduler(config.Rate, config.Operations, executor, options...)
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"slices"
 	"time"
+
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
 )
 
 // OperationExecutor is implemented by Executor and kept small so scheduler
@@ -29,6 +31,8 @@ type Scheduler struct {
 	random     WeightedRandomSource
 	handle     ExecutionHandler
 	newTicker  tickerFactory
+	limiter    ratelimit.Limiter
+	limit      ratelimit.Limit
 }
 
 type SchedulerOption func(*Scheduler)
@@ -45,6 +49,14 @@ func WithExecutionHandler(handler ExecutionHandler) SchedulerOption {
 	return func(scheduler *Scheduler) {
 		if handler != nil {
 			scheduler.handle = handler
+		}
+	}
+}
+
+func WithRateLimiter(limiter ratelimit.Limiter) SchedulerOption {
+	return func(scheduler *Scheduler) {
+		if limiter != nil {
+			scheduler.limiter = limiter
 		}
 	}
 }
@@ -77,6 +89,11 @@ func NewScheduler(
 		random:     globalRandomSource{},
 		handle:     logExecution,
 		newTicker:  newRealTicker,
+		limiter:    ratelimit.NewLocalLimiter(),
+		limit: ratelimit.Limit{
+			Requests: rate.RequestsPerMinute,
+			Window:   time.Minute,
+		},
 	}
 	for _, option := range options {
 		option(scheduler)
@@ -106,6 +123,16 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) executeSlot(ctx context.Context) {
+	decision, err := s.limiter.TryAcquire(ctx, s.limit)
+	if err != nil {
+		slog.Error("Kurama rate limiter failed", "error", err)
+		return
+	}
+	if !decision.Allowed {
+		slog.Debug("Kurama request slot rejected by rate limiter", "retryAfter", decision.RetryAfter)
+		return
+	}
+
 	excluded := make([]bool, len(s.operations))
 	for attempts := 0; attempts < len(s.operations); attempts++ {
 		index, ok := pickWeighted(s.operations, excluded, s.random)
