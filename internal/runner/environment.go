@@ -7,4 +7,5 @@ const (
 	RedisAddressEnv = "KURAMA_REDIS_ADDR"
 	NamespaceEnv    = "KURAMA_NAMESPACE"
 	ScenarioEnv     = "KURAMA_SCENARIO"
+	MetricsAddrEnv  = "KURAMA_METRICS_ADDR"
 )
