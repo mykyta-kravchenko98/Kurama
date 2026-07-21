@@ -3,6 +3,8 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,6 +56,53 @@ func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
 	}
 	if !decision.Allowed {
 		t.Fatal("acquisition in a new window was rejected")
+	}
+}
+
+func TestRedisRateLimiterDoesNotExceedSharedBudgetConcurrently(t *testing.T) {
+	t.Parallel()
+	server, firstClient := newTestRedis(t)
+	server.SetTime(time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC))
+	secondClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() {
+		if err := secondClient.Close(); err != nil {
+			t.Errorf("close second Redis client: %v", err)
+		}
+	})
+
+	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}
+	limiters := []*RedisRateLimiter{
+		newTestRedisRateLimiter(t, firstClient, scope),
+		newTestRedisRateLimiter(t, secondClient, scope),
+	}
+	limit := Limit{Requests: 40, Window: time.Minute}
+
+	const attempts = 200
+	var allowed atomic.Int32
+	var wait sync.WaitGroup
+	errorsChannel := make(chan error, attempts)
+	for i := range attempts {
+		limiter := limiters[i%len(limiters)]
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			decision, err := limiter.TryAcquire(context.Background(), limit)
+			if err != nil {
+				errorsChannel <- err
+				return
+			}
+			if decision.Allowed {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wait.Wait()
+	close(errorsChannel)
+	for err := range errorsChannel {
+		t.Errorf("TryAcquire() error = %v", err)
+	}
+	if got := allowed.Load(); got != int32(limit.Requests) {
+		t.Fatalf("allowed acquisitions = %d; want %d", got, limit.Requests)
 	}
 }
 
