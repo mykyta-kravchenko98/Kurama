@@ -91,16 +91,23 @@ turning it into an in-house replacement for a complete load-testing platform.
   configuration belong to `shorturl-gitops`, not to the Kurama implementation
   roadmap.
 
-### Phase 3 — persistent Redis value store (next)
+### Phase 3 — persistent Redis value store (complete)
 
-- Keep `MemoryStore` as the default backend and add a Redis implementation of
-  the existing context-aware `ValueStore` interface.
-- Isolate Redis keys by namespace, scenario and store name.
-- Preserve bounded-capacity semantics and random value selection.
-- Deploy Redis as a single-replica StatefulSet with AOF persistence and a PVC.
-- Verify that captured hashes survive runner and Redis Pod restarts.
-- Allow multiple runner replicas to share the same value pool.
-- Export Redis/store latency, error, size, miss and persistence metrics.
+- Kept `MemoryStore` as the default backend and added a Redis implementation
+  of the existing context-aware `ValueStore` interface.
+- Isolated Redis keys by namespace, scenario and store name.
+- Preserved bounded-capacity semantics, FIFO eviction and random value
+  selection with atomic Redis operations.
+- Deployed Redis through `shorturl-gitops` as a single-replica StatefulSet
+  with AOF persistence and a PVC.
+- Verified in kind that captured hashes survive both runner and Redis Pod
+  restarts.
+- Made Redis value pools shareable by runner replicas while keeping memory
+  pools local to a single runner.
+- Exported store operation counts, results and latency from the runner and
+  exposed its Prometheus endpoint through the generated Deployment.
+- Added a provisioned Kurama store dashboard to `shorturl-gitops` and verified
+  that Prometheus scrapes the live runner metrics.
 
 ### Phase 4 — dynamic traffic profiles
 
@@ -109,6 +116,8 @@ turning it into an in-house replacement for a complete load-testing platform.
   windows.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.
+- Add a Redis-backed distributed rate limiter before scaling a scenario to
+  multiple runner replicas, so replicas share one configured request budget.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
 
