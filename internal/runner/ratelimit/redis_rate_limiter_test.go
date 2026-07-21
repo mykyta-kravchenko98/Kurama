@@ -15,7 +15,8 @@ import (
 func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
 	t.Parallel()
 	server, firstClient := newTestRedis(t)
-	server.SetTime(time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC))
+	windowStart := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	server.SetTime(windowStart)
 	secondClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() {
 		if err := secondClient.Close(); err != nil {
@@ -49,7 +50,9 @@ func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
 		t.Fatalf("fourth acquisition RetryAfter = %s; want within one minute", decision.RetryAfter)
 	}
 
-	server.FastForward(time.Minute)
+	// FastForward only advances miniredis TTLs; the TIME command used by the
+	// Lua script follows the explicit server clock configured with SetTime.
+	server.SetTime(windowStart.Add(time.Minute))
 	decision, err = second.TryAcquire(context.Background(), limit)
 	if err != nil {
 		t.Fatal(err)

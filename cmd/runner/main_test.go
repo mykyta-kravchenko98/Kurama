@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
 )
 
 func TestRunExecutesConfiguredWorkload(t *testing.T) {
@@ -74,45 +75,49 @@ func TestLoadConfigReportsMissingFile(t *testing.T) {
 	}
 }
 
-func TestNewValueStoreDefaultsToMemory(t *testing.T) {
+func TestNewRuntimeStateDefaultsToMemory(t *testing.T) {
 	t.Parallel()
 
-	store, err := newValueStore(context.Background(), storeSettings{}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	state, err := newRuntimeState(context.Background(), storeSettings{}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
-		t.Fatalf("newValueStore() error = %v", err)
+		t.Fatalf("newRuntimeState() error = %v", err)
 	}
 	defer func() {
-		if err := store.Close(); err != nil {
+		if err := state.Close(); err != nil {
 			t.Errorf("Close() error = %v", err)
 		}
 	}()
-	if err := store.Put(context.Background(), "hashes", "memory-value"); err != nil {
+	if err := state.Put(context.Background(), "hashes", "memory-value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	if value, ok, err := store.Random(context.Background(), "hashes"); err != nil || !ok || value != "memory-value" {
+	if value, ok, err := state.Random(context.Background(), "hashes"); err != nil || !ok || value != "memory-value" {
 		t.Fatalf("Random() = (%q, %t, %v), want memory-value, true, nil", value, ok, err)
 	}
+	if _, ok := state.Limiter.(*ratelimit.LocalLimiter); !ok {
+		t.Fatalf("limiter type = %T; want *ratelimit.LocalLimiter", state.Limiter)
+	}
+	assertLimiterAllowsOneRequest(t, state.Limiter)
 }
 
-func TestNewValueStoreCreatesRedisBackend(t *testing.T) {
+func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 	t.Parallel()
 
 	server := miniredis.RunT(t)
-	store, err := newValueStore(context.Background(), storeSettings{
+	state, err := newRuntimeState(context.Background(), storeSettings{
 		Backend:      "redis",
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
 	}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
-		t.Fatalf("newValueStore() error = %v", err)
+		t.Fatalf("newRuntimeState() error = %v", err)
 	}
 	defer func() {
-		if err := store.Close(); err != nil {
+		if err := state.Close(); err != nil {
 			t.Errorf("Close() error = %v", err)
 		}
 	}()
-	if err := store.Put(context.Background(), "hashes", "redis-value"); err != nil {
+	if err := state.Put(context.Background(), "hashes", "redis-value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
 	values, err := server.List("kurama:v1:shorturl:load:hashes")
@@ -122,9 +127,13 @@ func TestNewValueStoreCreatesRedisBackend(t *testing.T) {
 	if len(values) != 1 || values[0] != "redis-value" {
 		t.Fatalf("Redis values = %v, want [redis-value]", values)
 	}
+	if _, ok := state.Limiter.(*ratelimit.RedisRateLimiter); !ok {
+		t.Fatalf("limiter type = %T; want *ratelimit.RedisRateLimiter", state.Limiter)
+	}
+	assertLimiterAllowsOneRequest(t, state.Limiter)
 }
 
-func TestNewValueStoreRejectsInvalidBackendSettings(t *testing.T) {
+func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -139,10 +148,21 @@ func TestNewValueStoreRejectsInvalidBackendSettings(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := newValueStore(context.Background(), test.settings, nil); err == nil {
-				t.Fatal("newValueStore() error = nil")
+			if _, err := newRuntimeState(context.Background(), test.settings, nil); err == nil {
+				t.Fatal("newRuntimeState() error = nil")
 			}
 		})
+	}
+}
+
+func assertLimiterAllowsOneRequest(t *testing.T, limiter ratelimit.Limiter) {
+	t.Helper()
+	decision, err := limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute})
+	if err != nil {
+		t.Fatalf("TryAcquire() error = %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatal("first rate limit acquisition was rejected")
 	}
 }
 

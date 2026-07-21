@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
 )
 
 const (
@@ -33,9 +34,10 @@ type storeSettings struct {
 	Scenario     string
 }
 
-type valueStoreHandle struct {
+type runtimeState struct {
 	runner.ValueStore
-	close func() error
+	Limiter ratelimit.Limiter
+	close   func() error
 }
 
 type metricsServer struct {
@@ -44,8 +46,8 @@ type metricsServer struct {
 	done    <-chan error
 }
 
-func (h *valueStoreHandle) Close() error {
-	return h.close()
+func (s *runtimeState) Close() error {
+	return s.close()
 }
 
 func main() {
@@ -73,13 +75,13 @@ func runWithMetricsAddress(
 		return err
 	}
 	settings := storeSettingsFromEnv()
-	stores, err := newValueStore(ctx, settings, config.Stores)
+	state, err := newRuntimeState(ctx, settings, config.Stores)
 	if err != nil {
-		return fmt.Errorf("create value store: %w", err)
+		return fmt.Errorf("create runner state: %w", err)
 	}
 	defer func() {
-		if err := stores.Close(); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("close value store: %w", err))
+		if err := state.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close runner state: %w", err))
 		}
 	}()
 	registry := prometheus.NewRegistry()
@@ -88,15 +90,15 @@ func runWithMetricsAddress(
 		return fmt.Errorf("create store metrics observer: %w", err)
 	}
 	instrumentedStore, err := runner.NewInstrumentedStore(
-		stores.ValueStore,
+		state.ValueStore,
 		normalizedStoreBackend(settings.Backend),
 		observer,
 	)
 	if err != nil {
 		return fmt.Errorf("instrument value store: %w", err)
 	}
-	stores.ValueStore = instrumentedStore
-	executor, err := runner.NewExecutor(config.Target, stores)
+	state.ValueStore = instrumentedStore
+	executor, err := runner.NewExecutor(config.Target, state)
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
 	}
@@ -177,14 +179,18 @@ func storeSettingsFromEnv() storeSettings {
 	}
 }
 
-func newValueStore(ctx context.Context, settings storeSettings, configs []runner.StoreConfig) (*valueStoreHandle, error) {
+func newRuntimeState(ctx context.Context, settings storeSettings, configs []runner.StoreConfig) (*runtimeState, error) {
 	switch normalizedStoreBackend(settings.Backend) {
 	case "memory":
 		store, err := runner.NewMemoryStore(configs)
 		if err != nil {
 			return nil, err
 		}
-		return &valueStoreHandle{ValueStore: store, close: func() error { return nil }}, nil
+		return &runtimeState{
+			ValueStore: store,
+			Limiter:    ratelimit.NewLocalLimiter(),
+			close:      func() error { return nil },
+		}, nil
 	case "redis":
 		if settings.RedisAddress == "" {
 			return nil, fmt.Errorf("%s must be set for Redis storage", runner.RedisAddressEnv)
@@ -208,7 +214,19 @@ func newValueStore(ctx context.Context, settings storeSettings, configs []runner
 			closeErr := client.Close()
 			return nil, errors.Join(err, closeErr)
 		}
-		return &valueStoreHandle{ValueStore: store, close: client.Close}, nil
+		limiter, err := ratelimit.NewRedisRateLimiter(client, ratelimit.RedisRateLimiterScope{
+			Namespace: settings.Namespace,
+			Scenario:  settings.Scenario,
+		})
+		if err != nil {
+			closeErr := client.Close()
+			return nil, errors.Join(err, closeErr)
+		}
+		return &runtimeState{
+			ValueStore: store,
+			Limiter:    limiter,
+			close:      client.Close,
+		}, nil
 	default:
 		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", runner.StoreBackendEnv, settings.Backend)
 	}
