@@ -10,6 +10,24 @@ type TargetSpec struct {
 
 type RateSpec struct {
 	RequestsPerMinute int `json:"requestsPerMinute"`
+	// Limiter selects how request permits are coordinated. When omitted, the
+	// controller preserves the existing behaviour: memory storage uses a local
+	// limiter and Redis storage uses a distributed Redis limiter.
+	// +optional
+	Limiter *RateLimiterSpec `json:"limiter,omitempty"`
+}
+
+type RateLimiterType string
+
+const (
+	RateLimiterTypeLocal RateLimiterType = "local"
+	RateLimiterTypeRedis RateLimiterType = "redis"
+)
+
+type RateLimiterSpec struct {
+	// +kubebuilder:validation:Enum=local;redis
+	// +optional
+	Type RateLimiterType `json:"type,omitempty"`
 }
 
 type StoreSpec struct {
@@ -76,6 +94,12 @@ type TrafficScenarioSpec struct {
 	Storage *StorageSpec `json:"storage,omitempty"`
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
+	// Replicas controls the number of runner Pods. Values greater than one
+	// require a distributed Redis rate limiter.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
 }
 
 type TrafficScenarioPhase string

@@ -24,6 +24,9 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "non HTTP target", mutate: func(c *Config) { c.Target.BaseURL = "postgres://db" }, wantErr: "scheme"},
 		{name: "credentials in target", mutate: func(c *Config) { c.Target.BaseURL = "http://user:pass@shorturl:8585" }, wantErr: "credentials"},
 		{name: "zero rate", mutate: func(c *Config) { c.Rate.RequestsPerMinute = 0 }, wantErr: "requestsPerMinute"},
+		{name: "unknown limiter", mutate: func(c *Config) {
+			c.Rate.Limiter = &RateLimiterConfig{Type: "postgres"}
+		}, wantErr: "rate.limiter.type"},
 		{name: "duplicate store", mutate: func(c *Config) { c.Stores = append(c.Stores, c.Stores[0]) }, wantErr: "duplicated"},
 		{name: "oversized body", mutate: func(c *Config) { c.Operations[0].Request.BodyTemplate = strings.Repeat("x", MaxRequestBodyBytes+1) }, wantErr: "exceeds"},
 		{name: "GET body", mutate: func(c *Config) { c.Operations[1].Request.BodyTemplate = "{}" }, wantErr: "GET request"},
@@ -52,7 +55,9 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 
 func TestDecodeConfig(t *testing.T) {
 	t.Parallel()
-	data, err := json.Marshal(validConfig())
+	want := validConfig()
+	want.Rate.Limiter = &RateLimiterConfig{Type: "redis"}
+	data, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +67,9 @@ func TestDecodeConfig(t *testing.T) {
 	}
 	if config.Rate.RequestsPerMinute != 30 {
 		t.Fatalf("requestsPerMinute = %d", config.Rate.RequestsPerMinute)
+	}
+	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
+		t.Fatalf("rate limiter = %#v, want redis", config.Rate.Limiter)
 	}
 }
 

@@ -48,7 +48,12 @@ type TargetConfig struct {
 }
 
 type RateConfig struct {
-	RequestsPerMinute int `json:"requestsPerMinute"`
+	RequestsPerMinute int                `json:"requestsPerMinute"`
+	Limiter           *RateLimiterConfig `json:"limiter,omitempty"`
+}
+
+type RateLimiterConfig struct {
+	Type string `json:"type,omitempty"`
 }
 
 type StoreConfig struct {
@@ -139,6 +144,13 @@ func (c Config) Validate() error {
 	}
 	if c.Rate.RequestsPerMinute < 1 || c.Rate.RequestsPerMinute > MaxRequestsPerMinute {
 		return fmt.Errorf("rate.requestsPerMinute must be between 1 and %d", MaxRequestsPerMinute)
+	}
+	if c.Rate.Limiter != nil {
+		switch c.Rate.Limiter.Type {
+		case "", "local", "redis":
+		default:
+			return fmt.Errorf("rate.limiter.type %q is unsupported; use local or redis", c.Rate.Limiter.Type)
+		}
 	}
 	if len(c.Stores) > MaxStores {
 		return fmt.Errorf("stores must contain at most %d entries", MaxStores)

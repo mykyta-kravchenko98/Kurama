@@ -78,7 +78,7 @@ func TestLoadConfigReportsMissingFile(t *testing.T) {
 func TestNewRuntimeStateDefaultsToMemory(t *testing.T) {
 	t.Parallel()
 
-	state, err := newRuntimeState(context.Background(), storeSettings{}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	state, err := newRuntimeState(context.Background(), storeSettings{}, "local", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
-	}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	}, "redis", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
 	}
@@ -133,22 +133,72 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 	assertLimiterAllowsOneRequest(t, state.Limiter)
 }
 
-func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
+func TestNewRuntimeStateSupportsMemoryStoreWithRedisLimiter(t *testing.T) {
+	t.Parallel()
+	server := miniredis.RunT(t)
+	state, err := newRuntimeState(context.Background(), storeSettings{
+		RedisAddress: server.Addr(),
+		Namespace:    "shorturl",
+		Scenario:     "load",
+	}, "redis", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newRuntimeState() error = %v", err)
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+	if _, ok := state.ValueStore.(*runner.MemoryStore); !ok {
+		t.Fatalf("store type = %T; want *runner.MemoryStore", state.ValueStore)
+	}
+	if _, ok := state.Limiter.(*ratelimit.RedisRateLimiter); !ok {
+		t.Fatalf("limiter type = %T; want *ratelimit.RedisRateLimiter", state.Limiter)
+	}
+}
+
+func TestNormalizedRateLimiterBackend(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		settings storeSettings
+		name         string
+		config       *runner.RateLimiterConfig
+		storeBackend string
+		want         string
 	}{
-		{name: "unknown backend", settings: storeSettings{Backend: "postgres"}},
-		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}},
-		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}},
-		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}},
+		{name: "defaults to local for memory store", want: "local"},
+		{name: "inherits Redis store backend", storeBackend: "redis", want: "redis"},
+		{name: "explicit local overrides Redis store", config: &runner.RateLimiterConfig{Type: "local"}, storeBackend: "redis", want: "local"},
+		{name: "explicit Redis with memory store", config: &runner.RateLimiterConfig{Type: "redis"}, want: "redis"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := newRuntimeState(context.Background(), test.settings, nil); err == nil {
+			if got := normalizedRateLimiterBackend(test.config, test.storeBackend); got != test.want {
+				t.Fatalf("normalizedRateLimiterBackend() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		settings       storeSettings
+		limiterBackend string
+	}{
+		{name: "unknown storage backend", settings: storeSettings{Backend: "postgres"}, limiterBackend: "local"},
+		{name: "unknown limiter backend", limiterBackend: "postgres"},
+		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}, limiterBackend: "redis"},
+		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}, limiterBackend: "redis"},
+		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}, limiterBackend: "redis"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := newRuntimeState(context.Background(), test.settings, test.limiterBackend, nil); err == nil {
 				t.Fatal("newRuntimeState() error = nil")
 			}
 		})
