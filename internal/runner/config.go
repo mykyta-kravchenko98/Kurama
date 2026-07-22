@@ -50,9 +50,14 @@ type TargetConfig struct {
 type RateConfig struct {
 	RequestsPerMinute int                `json:"requestsPerMinute"`
 	Limiter           *RateLimiterConfig `json:"limiter,omitempty"`
+	Profile           *RateProfileConfig `json:"profile,omitempty"`
 }
 
 type RateLimiterConfig struct {
+	Type string `json:"type,omitempty"`
+}
+
+type RateProfileConfig struct {
 	Type string `json:"type,omitempty"`
 }
 
@@ -150,6 +155,13 @@ func (c Config) Validate() error {
 		case "", "local", "redis":
 		default:
 			return fmt.Errorf("rate.limiter.type %q is unsupported; use local or redis", c.Rate.Limiter.Type)
+		}
+	}
+	if c.Rate.Profile != nil {
+		switch c.Rate.Profile.Type {
+		case "", "fixed", "uniform":
+		default:
+			return fmt.Errorf("rate.profile.type %q is unsupported; use fixed or uniform", c.Rate.Profile.Type)
 		}
 	}
 	if len(c.Stores) > MaxStores {

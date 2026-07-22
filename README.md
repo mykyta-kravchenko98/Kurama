@@ -27,7 +27,7 @@ is an ordinary workload Pod, so a failed or busy traffic generator cannot
 block reconciliation of the custom resource.
 
 The supported protocol is currently HTTP/HTTPS. A scenario declares a target,
-weighted request operations, a fixed traffic rate and bounded value stores.
+weighted request operations, a traffic profile and bounded value stores.
 Authentication and Secret references are planned; secret values will never be
 stored directly in the custom resource.
 
@@ -111,13 +111,15 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 ### Phase 4 — dynamic traffic profiles
 
-- Add fixed, uniform random, normal and burst traffic profiles.
+- Kept fixed scheduling as the default and added a uniform-random delay
+  profile with the configured requests-per-minute value as its mean rate.
+- Added a Redis-backed distributed rate limiter and replica configuration, so
+  multiple runners share one request budget.
+- Add normal and burst traffic profiles.
 - Allow the requests-per-minute value to change between configured time
   windows.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.
-- Add a Redis-backed distributed rate limiter before scaling a scenario to
-  multiple runner replicas, so replicas share one configured request budget.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
 

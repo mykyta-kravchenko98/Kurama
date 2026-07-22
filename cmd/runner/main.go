@@ -140,6 +140,7 @@ func runWithMetricsAddress(
 		"metricsAddress", metricsAddress,
 		"storeBackend", normalizedStoreBackend(settings.Backend),
 		"rateLimiterBackend", limiterBackend,
+		"rateProfile", normalizedRateProfileType(config.Rate.Profile),
 		"target", config.Target.BaseURL,
 		"requestsPerMinute", config.Rate.RequestsPerMinute,
 		"operations", len(config.Operations),
@@ -287,6 +288,13 @@ func normalizedRateLimiterBackend(config *runner.RateLimiterConfig, storeBackend
 		return "redis"
 	}
 	return "local"
+}
+
+func normalizedRateProfileType(config *runner.RateProfileConfig) string {
+	if config == nil || config.Type == "" {
+		return "fixed"
+	}
+	return config.Type
 }
 
 func loadConfig(path string) (runner.Config, error) {

@@ -47,6 +47,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "local" {
 		t.Fatalf("scenario limiter config = %#v; want local", config.Rate.Limiter)
 	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "fixed" {
+		t.Fatalf("scenario profile config = %#v; want fixed", config.Rate.Profile)
+	}
 
 	var deployment appsv1.Deployment
 	if err := client.Get(ctx, key, &deployment); err != nil {
@@ -98,6 +101,7 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	}
 	scenario.Spec.Replicas = 2
 	scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeRedis}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: trafficv1alpha1.RateProfileTypeUniform}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
 	reconciler := &TrafficScenarioReconciler{
 		Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RedisAddress: "kurama-redis:6379",
@@ -133,6 +137,9 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	}
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
 		t.Fatalf("scenario limiter config = %#v; want redis", config.Rate.Limiter)
+	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "uniform" {
+		t.Fatalf("scenario profile config = %#v; want uniform", config.Rate.Profile)
 	}
 }
 
@@ -288,6 +295,15 @@ func TestValidateScenarioRejectsUnknownLimiterAndLocalMultiReplica(t *testing.T)
 				t.Fatal("validateScenario() error = nil")
 			}
 		})
+	}
+}
+
+func TestValidateScenarioRejectsUnknownRateProfile(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: "burst"}
+	if err := validateScenario(scenario); err == nil {
+		t.Fatal("validateScenario() error = nil")
 	}
 }
 

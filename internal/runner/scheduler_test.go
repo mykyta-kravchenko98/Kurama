@@ -5,7 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,18 +116,22 @@ func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	}
 }
 
-func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
+func TestSchedulerRunExecutesImmediatelyAndAfterProfileDelay(t *testing.T) {
 	t.Parallel()
 	executor := &recordingExecutor{called: make(chan struct{}, 2)}
 	scheduler := newTestScheduler(t, executor,
 		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
 	)
-	ticker := &manualTicker{ticks: make(chan time.Time, 1)}
-	scheduler.newTicker = func(interval time.Duration) schedulerTicker {
-		if interval != 2*time.Second {
-			t.Errorf("ticker interval = %s; want 2s", interval)
+	delays := make(chan time.Duration, 1)
+	release := make(chan struct{}, 1)
+	scheduler.wait = func(ctx context.Context, delay time.Duration) bool {
+		delays <- delay
+		select {
+		case <-ctx.Done():
+			return false
+		case <-release:
+			return true
 		}
-		return ticker
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,7 +141,15 @@ func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
 		close(done)
 	}()
 	waitForExecution(t, executor.called)
-	ticker.ticks <- time.Now()
+	select {
+	case delay := <-delays:
+		if delay != 2*time.Second {
+			t.Fatalf("profile delay = %s; want 2s", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not wait for profile delay")
+	}
+	release <- struct{}{}
 	waitForExecution(t, executor.called)
 	cancel()
 
@@ -146,9 +157,6 @@ func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run() did not stop after context cancellation")
-	}
-	if !ticker.stopped.Load() {
-		t.Fatal("ticker was not stopped")
 	}
 }
 
@@ -165,6 +173,10 @@ func TestNewSchedulerValidatesInputs(t *testing.T) {
 		{name: "no operations", rate: RateConfig{RequestsPerMinute: 30}, executor: executor},
 		{name: "zero weight", rate: RateConfig{RequestsPerMinute: 30}, operations: []OperationConfig{{Name: "get"}}, executor: executor},
 		{name: "nil executor", rate: RateConfig{RequestsPerMinute: 30}, operations: schedulerOperations()},
+		{name: "unknown profile", rate: RateConfig{
+			RequestsPerMinute: 30,
+			Profile:           &RateProfileConfig{Type: "burst"},
+		}, operations: schedulerOperations(), executor: executor},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -251,19 +263,6 @@ func (e *recordingExecutor) operationNames() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.names...)
-}
-
-type manualTicker struct {
-	ticks   chan time.Time
-	stopped atomic.Bool
-}
-
-func (t *manualTicker) C() <-chan time.Time {
-	return t.ticks
-}
-
-func (t *manualTicker) Stop() {
-	t.stopped.Store(true)
 }
 
 func waitForExecution(t *testing.T, calls <-chan struct{}) {

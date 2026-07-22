@@ -27,6 +27,9 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "unknown limiter", mutate: func(c *Config) {
 			c.Rate.Limiter = &RateLimiterConfig{Type: "postgres"}
 		}, wantErr: "rate.limiter.type"},
+		{name: "unknown profile", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst"}
+		}, wantErr: "rate.profile.type"},
 		{name: "duplicate store", mutate: func(c *Config) { c.Stores = append(c.Stores, c.Stores[0]) }, wantErr: "duplicated"},
 		{name: "oversized body", mutate: func(c *Config) { c.Operations[0].Request.BodyTemplate = strings.Repeat("x", MaxRequestBodyBytes+1) }, wantErr: "exceeds"},
 		{name: "GET body", mutate: func(c *Config) { c.Operations[1].Request.BodyTemplate = "{}" }, wantErr: "GET request"},
@@ -57,6 +60,7 @@ func TestDecodeConfig(t *testing.T) {
 	t.Parallel()
 	want := validConfig()
 	want.Rate.Limiter = &RateLimiterConfig{Type: "redis"}
+	want.Rate.Profile = &RateProfileConfig{Type: "uniform"}
 	data, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +74,9 @@ func TestDecodeConfig(t *testing.T) {
 	}
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
 		t.Fatalf("rate limiter = %#v, want redis", config.Rate.Limiter)
+	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "uniform" {
+		t.Fatalf("rate profile = %#v, want uniform", config.Rate.Profile)
 	}
 }
 

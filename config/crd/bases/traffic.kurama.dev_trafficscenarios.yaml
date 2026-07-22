@@ -144,6 +144,14 @@ spec:
                           enum:
                             - local
                             - redis
+                    profile:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - fixed
+                            - uniform
                     requestsPerMinute:
                       type: integer
                       minimum: 1

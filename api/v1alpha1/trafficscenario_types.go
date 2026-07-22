@@ -15,6 +15,10 @@ type RateSpec struct {
 	// limiter and Redis storage uses a distributed Redis limiter.
 	// +optional
 	Limiter *RateLimiterSpec `json:"limiter,omitempty"`
+	// Profile controls the delay between request attempts. When omitted, the
+	// original fixed-interval scheduling behaviour is preserved.
+	// +optional
+	Profile *RateProfileSpec `json:"profile,omitempty"`
 }
 
 type RateLimiterType string
@@ -28,6 +32,19 @@ type RateLimiterSpec struct {
 	// +kubebuilder:validation:Enum=local;redis
 	// +optional
 	Type RateLimiterType `json:"type,omitempty"`
+}
+
+type RateProfileType string
+
+const (
+	RateProfileTypeFixed   RateProfileType = "fixed"
+	RateProfileTypeUniform RateProfileType = "uniform"
+)
+
+type RateProfileSpec struct {
+	// +kubebuilder:validation:Enum=fixed;uniform
+	// +optional
+	Type RateProfileType `json:"type,omitempty"`
 }
 
 type StoreSpec struct {

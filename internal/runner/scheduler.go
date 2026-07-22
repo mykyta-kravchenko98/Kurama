@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	trafficprofile "github.com/mykyta-kravchenko98/Kurama/internal/runner/profile"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
 )
 
@@ -25,12 +26,12 @@ type WeightedRandomSource interface {
 type ExecutionHandler func(result ExecutionResult, err error)
 
 type Scheduler struct {
-	interval   time.Duration
+	profile    trafficprofile.Timing
 	operations []OperationConfig
 	executor   OperationExecutor
 	random     WeightedRandomSource
 	handle     ExecutionHandler
-	newTicker  tickerFactory
+	wait       waitForDelay
 	limiter    ratelimit.Limiter
 	limit      ratelimit.Limit
 }
@@ -81,14 +82,22 @@ func NewScheduler(
 	if executor == nil {
 		return nil, fmt.Errorf("operation executor must not be nil")
 	}
+	profileType := ""
+	if rate.Profile != nil {
+		profileType = rate.Profile.Type
+	}
+	delayProfile, err := trafficprofile.New(profileType, rate.RequestsPerMinute)
+	if err != nil {
+		return nil, fmt.Errorf("create traffic profile: %w", err)
+	}
 
 	scheduler := &Scheduler{
-		interval:   time.Minute / time.Duration(rate.RequestsPerMinute),
+		profile:    delayProfile,
 		operations: slices.Clone(operations),
 		executor:   executor,
 		random:     globalRandomSource{},
 		handle:     logExecution,
-		newTicker:  newRealTicker,
+		wait:       waitWithTimer,
 		limiter:    ratelimit.NewLocalLimiter(),
 		limit: ratelimit.Limit{
 			Requests: rate.RequestsPerMinute,
@@ -101,24 +110,20 @@ func NewScheduler(
 	return scheduler, nil
 }
 
-// Run executes one operation immediately and then at the configured fixed-RPM
-// interval. Calls are deliberately sequential: slow targets reduce achieved
-// RPM instead of causing an unbounded queue or concurrent request burst.
+// Run executes one operation immediately and then waits for the active traffic
+// profile before each subsequent slot. Calls are deliberately sequential: slow
+// targets reduce achieved RPM instead of creating an unbounded request queue.
 func (s *Scheduler) Run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
 	s.executeSlot(ctx)
 
-	ticker := s.newTicker(s.interval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if !s.wait(ctx, s.profile.NextDelay()) {
 			return
-		case <-ticker.C():
-			s.executeSlot(ctx)
 		}
+		s.executeSlot(ctx)
 	}
 }
 
@@ -206,25 +211,15 @@ func (globalRandomSource) IntN(n int) int {
 	return rand.IntN(n)
 }
 
-type schedulerTicker interface {
-	C() <-chan time.Time
-	Stop()
-}
+type waitForDelay func(ctx context.Context, delay time.Duration) bool
 
-type tickerFactory func(interval time.Duration) schedulerTicker
-
-type realTicker struct {
-	ticker *time.Ticker
-}
-
-func newRealTicker(interval time.Duration) schedulerTicker {
-	return realTicker{ticker: time.NewTicker(interval)}
-}
-
-func (t realTicker) C() <-chan time.Time {
-	return t.ticker.C
-}
-
-func (t realTicker) Stop() {
-	t.ticker.Stop()
+func waitWithTimer(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

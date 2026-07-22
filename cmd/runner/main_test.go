@@ -181,6 +181,27 @@ func TestNormalizedRateLimiterBackend(t *testing.T) {
 	}
 }
 
+func TestNormalizedRateProfileType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config *runner.RateProfileConfig
+		want   string
+	}{
+		{name: "omitted", want: "fixed"},
+		{name: "empty", config: &runner.RateProfileConfig{}, want: "fixed"},
+		{name: "uniform", config: &runner.RateProfileConfig{Type: "uniform"}, want: "uniform"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizedRateProfileType(test.config); got != test.want {
+				t.Fatalf("normalizedRateProfileType() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
 	t.Parallel()
 
