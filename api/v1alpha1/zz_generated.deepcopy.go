@@ -30,12 +30,29 @@ func (in *OperationSpec) DeepCopy() *OperationSpec {
 	in.DeepCopyInto(out)
 	return out
 }
-func (in *RateSpec) DeepCopyInto(out *RateSpec) { *out = *in }
+func (in *RateSpec) DeepCopyInto(out *RateSpec) {
+	*out = *in
+	if in.Limiter != nil {
+		in, out := &in.Limiter, &out.Limiter
+		*out = new(RateLimiterSpec)
+		**out = **in
+	}
+}
 func (in *RateSpec) DeepCopy() *RateSpec {
 	if in == nil {
 		return nil
 	}
 	out := new(RateSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+func (in *RateLimiterSpec) DeepCopyInto(out *RateLimiterSpec) { *out = *in }
+func (in *RateLimiterSpec) DeepCopy() *RateLimiterSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(RateLimiterSpec)
 	in.DeepCopyInto(out)
 	return out
 }

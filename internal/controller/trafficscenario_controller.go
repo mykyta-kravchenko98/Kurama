@@ -70,7 +70,7 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if r.RunnerImage == "" {
 		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"))
 	}
-	if storageBackend(&scenario) == string(trafficv1alpha1.StorageTypeRedis) && r.RedisAddress == "" {
+	if requiresRedis(&scenario) && r.RedisAddress == "" {
 		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing %s", runner.RedisAddressEnv))
 	}
 
@@ -100,6 +100,20 @@ func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
 		default:
 			return fmt.Errorf("spec.storage.type %q is unsupported; use memory or redis", scenario.Spec.Storage.Type)
 		}
+	}
+	if scenario.Spec.Rate.Limiter != nil {
+		switch scenario.Spec.Rate.Limiter.Type {
+		case "", trafficv1alpha1.RateLimiterTypeLocal, trafficv1alpha1.RateLimiterTypeRedis:
+		default:
+			return fmt.Errorf("spec.rate.limiter.type %q is unsupported; use local or redis", scenario.Spec.Rate.Limiter.Type)
+		}
+	}
+	replicas := runnerReplicas(scenario)
+	if replicas < 1 || replicas > 10 {
+		return fmt.Errorf("spec.replicas must be between 1 and 10")
+	}
+	if replicas > 1 && rateLimiterBackend(scenario) != string(trafficv1alpha1.RateLimiterTypeRedis) {
+		return fmt.Errorf("spec.replicas greater than 1 requires spec.rate.limiter.type redis")
 	}
 	if err := scenarioRunnerConfig(scenario).Validate(); err != nil {
 		return fmt.Errorf("spec: %w", err)
@@ -138,7 +152,7 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](1),
+			Replicas: ptr.To(runnerReplicas(scenario)),
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -159,7 +173,7 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress string) []corev1.EnvVar {
 	backend := storageBackend(scenario)
 	environment := []corev1.EnvVar{{Name: runner.StoreBackendEnv, Value: backend}}
-	if backend != string(trafficv1alpha1.StorageTypeRedis) {
+	if !requiresRedis(scenario) {
 		return environment
 	}
 	return append(environment,
@@ -174,6 +188,28 @@ func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress s
 	)
 }
 
+func runnerReplicas(scenario *trafficv1alpha1.TrafficScenario) int32 {
+	if scenario.Spec.Replicas == 0 {
+		return 1
+	}
+	return scenario.Spec.Replicas
+}
+
+func rateLimiterBackend(scenario *trafficv1alpha1.TrafficScenario) string {
+	if scenario.Spec.Rate.Limiter != nil && scenario.Spec.Rate.Limiter.Type != "" {
+		return string(scenario.Spec.Rate.Limiter.Type)
+	}
+	if storageBackend(scenario) == string(trafficv1alpha1.StorageTypeRedis) {
+		return string(trafficv1alpha1.RateLimiterTypeRedis)
+	}
+	return string(trafficv1alpha1.RateLimiterTypeLocal)
+}
+
+func requiresRedis(scenario *trafficv1alpha1.TrafficScenario) bool {
+	return storageBackend(scenario) == string(trafficv1alpha1.StorageTypeRedis) ||
+		rateLimiterBackend(scenario) == string(trafficv1alpha1.RateLimiterTypeRedis)
+}
+
 func storageBackend(scenario *trafficv1alpha1.TrafficScenario) string {
 	if scenario.Spec.Storage == nil || scenario.Spec.Storage.Type == "" {
 		return string(trafficv1alpha1.StorageTypeMemory)
@@ -183,8 +219,13 @@ func storageBackend(scenario *trafficv1alpha1.TrafficScenario) string {
 
 func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Config {
 	config := runner.Config{
-		Target:     runner.TargetConfig{BaseURL: scenario.Spec.Target.BaseURL},
-		Rate:       runner.RateConfig{RequestsPerMinute: scenario.Spec.Rate.RequestsPerMinute},
+		Target: runner.TargetConfig{BaseURL: scenario.Spec.Target.BaseURL},
+		Rate: runner.RateConfig{
+			RequestsPerMinute: scenario.Spec.Rate.RequestsPerMinute,
+			Limiter: &runner.RateLimiterConfig{
+				Type: rateLimiterBackend(scenario),
+			},
+		},
 		Stores:     make([]runner.StoreConfig, len(scenario.Spec.Stores)),
 		Operations: make([]runner.OperationConfig, len(scenario.Spec.Operations)),
 	}

@@ -44,6 +44,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if config.Rate.RequestsPerMinute != 30 || len(config.Stores) != 1 || len(config.Operations) != 3 {
 		t.Fatalf("scenario config = %#v", config)
 	}
+	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "local" {
+		t.Fatalf("scenario limiter config = %#v; want local", config.Rate.Limiter)
+	}
 
 	var deployment appsv1.Deployment
 	if err := client.Get(ctx, key, &deployment); err != nil {
@@ -55,6 +58,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Spec.ImagePullSecrets; len(got) != 1 || got[0].Name != "registry-secret" {
 		t.Fatalf("runner imagePullSecrets = %#v", got)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+		t.Fatalf("runner replicas = %v; want 1", deployment.Spec.Replicas)
 	}
 	if got := envValue(container.Env, runner.StoreBackendEnv); got != "memory" {
 		t.Fatalf("runner store backend = %q, want memory", got)
@@ -79,6 +85,54 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
+	}
+}
+
+func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Replicas = 2
+	scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeRedis}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RedisAddress: "kurama-redis:6379",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	key := types.NamespacedName{Namespace: "shorturl", Name: "shorturl-runner"}
+	var deployment appsv1.Deployment
+	if err := client.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 {
+		t.Fatalf("runner replicas = %v; want 2", deployment.Spec.Replicas)
+	}
+	environment := deployment.Spec.Template.Spec.Containers[0].Env
+	if got := envValue(environment, runner.StoreBackendEnv); got != "memory" {
+		t.Fatalf("runner store backend = %q; want memory", got)
+	}
+	if got := envValue(environment, runner.RedisAddressEnv); got != "kurama-redis:6379" {
+		t.Fatalf("runner Redis address = %q", got)
+	}
+
+	var configMap corev1.ConfigMap
+	if err := client.Get(ctx, key, &configMap); err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	config, err := runner.DecodeConfig(strings.NewReader(configMap.Data["scenario.json"]))
+	if err != nil {
+		t.Fatalf("decode scenario config: %v", err)
+	}
+	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
+		t.Fatalf("scenario limiter config = %#v; want redis", config.Rate.Limiter)
 	}
 }
 
@@ -148,6 +202,30 @@ func TestReconcileRejectsRedisWithoutControllerAddress(t *testing.T) {
 	}
 }
 
+func TestReconcileRejectsRedisLimiterWithoutControllerAddress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeRedis}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
+	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err == nil {
+		t.Fatal("reconcile error = nil")
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "shorturl", Name: "shorturl"}, &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseFailed || !strings.Contains(actual.Status.Message, runner.RedisAddressEnv) {
+		t.Fatalf("scenario status = %#v", actual.Status)
+	}
+}
+
 func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -184,6 +262,32 @@ func TestValidateScenarioRejectsUnknownStorageType(t *testing.T) {
 	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: "postgres"}
 	if err := validateScenario(scenario); err == nil {
 		t.Fatal("validateScenario unexpectedly accepted unknown storage type")
+	}
+}
+
+func TestValidateScenarioRejectsUnknownLimiterAndLocalMultiReplica(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*trafficv1alpha1.TrafficScenario)
+	}{
+		{name: "unknown limiter", mutate: func(scenario *trafficv1alpha1.TrafficScenario) {
+			scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: "postgres"}
+		}},
+		{name: "local multi replica", mutate: func(scenario *trafficv1alpha1.TrafficScenario) {
+			scenario.Spec.Replicas = 2
+			scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeLocal}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+			test.mutate(scenario)
+			if err := validateScenario(scenario); err == nil {
+				t.Fatal("validateScenario() error = nil")
+			}
+		})
 	}
 }
 

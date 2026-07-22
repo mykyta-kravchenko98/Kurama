@@ -75,7 +75,8 @@ func runWithMetricsAddress(
 		return err
 	}
 	settings := storeSettingsFromEnv()
-	state, err := newRuntimeState(ctx, settings, config.Stores)
+	limiterBackend := normalizedRateLimiterBackend(config.Rate.Limiter, settings.Backend)
+	state, err := newRuntimeState(ctx, settings, limiterBackend, config.Stores)
 	if err != nil {
 		return fmt.Errorf("create runner state: %w", err)
 	}
@@ -104,7 +105,7 @@ func runWithMetricsAddress(
 	}
 	instrumentedLimiter, err := ratelimit.NewInstrumentedLimiter(
 		state.Limiter,
-		normalizedStoreBackend(settings.Backend),
+		limiterBackend,
 		limiterObserver,
 	)
 	if err != nil {
@@ -138,6 +139,7 @@ func runWithMetricsAddress(
 		"config", configPath,
 		"metricsAddress", metricsAddress,
 		"storeBackend", normalizedStoreBackend(settings.Backend),
+		"rateLimiterBackend", limiterBackend,
 		"target", config.Target.BaseURL,
 		"requestsPerMinute", config.Rate.RequestsPerMinute,
 		"operations", len(config.Operations),
@@ -195,57 +197,79 @@ func storeSettingsFromEnv() storeSettings {
 	}
 }
 
-func newRuntimeState(ctx context.Context, settings storeSettings, configs []runner.StoreConfig) (*runtimeState, error) {
-	switch normalizedStoreBackend(settings.Backend) {
-	case "memory":
-		store, err := runner.NewMemoryStore(configs)
-		if err != nil {
-			return nil, err
-		}
-		return &runtimeState{
-			ValueStore: store,
-			Limiter:    ratelimit.NewLocalLimiter(),
-			close:      func() error { return nil },
-		}, nil
-	case "redis":
+func newRuntimeState(
+	ctx context.Context,
+	settings storeSettings,
+	limiterBackend string,
+	configs []runner.StoreConfig,
+) (*runtimeState, error) {
+	storeBackend := normalizedStoreBackend(settings.Backend)
+	if storeBackend != "memory" && storeBackend != "redis" {
+		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", runner.StoreBackendEnv, settings.Backend)
+	}
+	if limiterBackend != "local" && limiterBackend != "redis" {
+		return nil, fmt.Errorf("rate limiter backend %q is unsupported; use local or redis", limiterBackend)
+	}
+
+	var client *redis.Client
+	closeState := func() error { return nil }
+	if storeBackend == "redis" || limiterBackend == "redis" {
 		if settings.RedisAddress == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", runner.RedisAddressEnv)
+			return nil, fmt.Errorf("%s must be set when Redis is used", runner.RedisAddressEnv)
 		}
 		if settings.Namespace == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", runner.NamespaceEnv)
+			return nil, fmt.Errorf("%s must be set when Redis is used", runner.NamespaceEnv)
 		}
 		if settings.Scenario == "" {
-			return nil, fmt.Errorf("%s must be set for Redis storage", runner.ScenarioEnv)
+			return nil, fmt.Errorf("%s must be set when Redis is used", runner.ScenarioEnv)
 		}
-		client := redis.NewClient(&redis.Options{Addr: settings.RedisAddress})
+		client = redis.NewClient(&redis.Options{Addr: settings.RedisAddress})
 		if err := client.Ping(ctx).Err(); err != nil {
 			closeErr := client.Close()
 			return nil, errors.Join(fmt.Errorf("ping Redis: %w", err), closeErr)
 		}
-		store, err := runner.NewRedisStore(client, runner.RedisStoreScope{
+		closeState = client.Close
+	}
+
+	var store runner.ValueStore
+	var err error
+	switch storeBackend {
+	case "memory":
+		store, err = runner.NewMemoryStore(configs)
+	case "redis":
+		store, err = runner.NewRedisStore(client, runner.RedisStoreScope{
 			Namespace: settings.Namespace,
 			Scenario:  settings.Scenario,
 		}, configs)
-		if err != nil {
-			closeErr := client.Close()
-			return nil, errors.Join(err, closeErr)
-		}
-		limiter, err := ratelimit.NewRedisRateLimiter(client, ratelimit.RedisRateLimiterScope{
+	}
+	if err != nil {
+		return nil, errors.Join(err, closeState())
+	}
+	return newRuntimeStateWithLimiter(store, client, closeState, settings, limiterBackend)
+}
+
+func newRuntimeStateWithLimiter(
+	store runner.ValueStore,
+	client redis.UniversalClient,
+	closeState func() error,
+	settings storeSettings,
+	limiterBackend string,
+) (*runtimeState, error) {
+	var limiter ratelimit.Limiter
+	switch limiterBackend {
+	case "local":
+		limiter = ratelimit.NewLocalLimiter()
+	case "redis":
+		redisLimiter, err := ratelimit.NewRedisRateLimiter(client, ratelimit.RedisRateLimiterScope{
 			Namespace: settings.Namespace,
 			Scenario:  settings.Scenario,
 		})
 		if err != nil {
-			closeErr := client.Close()
-			return nil, errors.Join(err, closeErr)
+			return nil, errors.Join(err, closeState())
 		}
-		return &runtimeState{
-			ValueStore: store,
-			Limiter:    limiter,
-			close:      client.Close,
-		}, nil
-	default:
-		return nil, fmt.Errorf("%s %q is unsupported; use memory or redis", runner.StoreBackendEnv, settings.Backend)
+		limiter = redisLimiter
 	}
+	return &runtimeState{ValueStore: store, Limiter: limiter, close: closeState}, nil
 }
 
 func normalizedStoreBackend(backend string) string {
@@ -253,6 +277,16 @@ func normalizedStoreBackend(backend string) string {
 		return "memory"
 	}
 	return backend
+}
+
+func normalizedRateLimiterBackend(config *runner.RateLimiterConfig, storeBackend string) string {
+	if config != nil && config.Type != "" {
+		return config.Type
+	}
+	if normalizedStoreBackend(storeBackend) == "redis" {
+		return "redis"
+	}
+	return "local"
 }
 
 func loadConfig(path string) (runner.Config, error) {
