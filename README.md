@@ -117,6 +117,8 @@ turning it into an in-house replacement for a complete load-testing platform.
   multiple runners share one request budget.
 - Added fixed and Redis-coordinated uniform schedules, allowing one shared RPM
   value to be selected for each configured time window.
+- Exported the current selected RPM, schedule resolution results and resolution
+  latency through the runner Prometheus endpoint.
 - Add normal and burst traffic profiles.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.
