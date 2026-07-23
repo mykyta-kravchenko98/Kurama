@@ -10,6 +10,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 )
 
 type metricsServer struct {
@@ -24,7 +26,9 @@ func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsS
 		return nil, fmt.Errorf("listen on %q: %w", address, err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	mux.Handle(runner.MetricsPath, promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	mux.HandleFunc(runner.HealthPath, healthy)
+	mux.HandleFunc(runner.ReadinessPath, healthy)
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -34,6 +38,10 @@ func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsS
 		done <- server.Serve(listener)
 	}()
 	return &metricsServer{server: server, address: listener.Addr().String(), done: done}, nil
+}
+
+func healthy(writer http.ResponseWriter, _ *http.Request) {
+	writer.WriteHeader(http.StatusOK)
 }
 
 func (s *metricsServer) Shutdown(ctx context.Context) error {

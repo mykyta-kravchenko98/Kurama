@@ -18,7 +18,6 @@ import (
 
 const (
 	scenarioConfigPath     = "/etc/kurama/scenario.json"
-	defaultMetricsAddress  = ":8080"
 	metricsShutdownTimeout = 5 * time.Second
 )
 
