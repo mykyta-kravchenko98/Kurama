@@ -75,6 +75,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if metricsPort.Name != "metrics" || metricsPort.ContainerPort != 8080 || metricsPort.Protocol != corev1.ProtocolTCP {
 		t.Fatalf("runner metrics port = %#v", metricsPort)
 	}
+	assertRunnerProbe(t, "startup", container.StartupProbe, runner.HealthPath, 2, 30)
+	assertRunnerProbe(t, "liveness", container.LivenessProbe, runner.HealthPath, 10, 3)
+	assertRunnerProbe(t, "readiness", container.ReadinessProbe, runner.ReadinessPath, 5, 3)
 	annotations := deployment.Spec.Template.Annotations
 	wantAnnotations := map[string]string{
 		"prometheus.io/scrape": "true",
@@ -88,6 +91,27 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
+	}
+}
+
+func assertRunnerProbe(
+	t *testing.T,
+	name string,
+	probe *corev1.Probe,
+	path string,
+	periodSeconds int32,
+	failureThreshold int32,
+) {
+	t.Helper()
+	if probe == nil || probe.HTTPGet == nil {
+		t.Fatalf("%s probe = %#v; want HTTP probe", name, probe)
+	}
+	if probe.HTTPGet.Path != path || probe.HTTPGet.Port.StrVal != runner.MetricsPortName {
+		t.Errorf("%s HTTP probe = %#v", name, probe.HTTPGet)
+	}
+	if probe.TimeoutSeconds != 1 || probe.PeriodSeconds != periodSeconds ||
+		probe.SuccessThreshold != 1 || probe.FailureThreshold != failureThreshold {
+		t.Errorf("%s probe timing = %#v", name, probe)
 	}
 }
 

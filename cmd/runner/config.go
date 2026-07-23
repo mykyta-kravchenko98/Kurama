@@ -11,7 +11,7 @@ func metricsAddressFromEnv() string {
 	if address := os.Getenv(runner.MetricsAddrEnv); address != "" {
 		return address
 	}
-	return defaultMetricsAddress
+	return fmt.Sprintf(":%d", runner.MetricsPort)
 }
 
 func loadConfig(path string) (runner.Config, error) {

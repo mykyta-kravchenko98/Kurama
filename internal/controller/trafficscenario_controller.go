@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -146,10 +147,13 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 			Env:          runnerEnvironment(scenario, redisAddress),
 			VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
 			Ports: []corev1.ContainerPort{{
-				Name:          "metrics",
-				ContainerPort: 8080,
+				Name:          runner.MetricsPortName,
+				ContainerPort: runner.MetricsPort,
 				Protocol:      corev1.ProtocolTCP,
 			}},
+			StartupProbe:   runnerHTTPProbe(runner.HealthPath, 2, 30),
+			LivenessProbe:  runnerHTTPProbe(runner.HealthPath, 10, 3),
+			ReadinessProbe: runnerHTTPProbe(runner.ReadinessPath, 5, 3),
 		}},
 		Volumes: []corev1.Volume{{Name: "scenario", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}},
 	}
@@ -167,13 +171,28 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 					Annotations: map[string]string{
 						configHashAnnotation:   configHash(scenarioConfigJSON(scenario)),
 						"prometheus.io/scrape": "true",
-						"prometheus.io/port":   "8080",
-						"prometheus.io/path":   "/metrics",
+						"prometheus.io/port":   fmt.Sprintf("%d", runner.MetricsPort),
+						"prometheus.io/path":   runner.MetricsPath,
 					},
 				},
 				Spec: podSpec,
 			},
 		},
+	}
+}
+
+func runnerHTTPProbe(path string, periodSeconds, failureThreshold int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: path,
+				Port: intstr.FromString(runner.MetricsPortName),
+			},
+		},
+		TimeoutSeconds:   1,
+		PeriodSeconds:    periodSeconds,
+		SuccessThreshold: 1,
+		FailureThreshold: failureThreshold,
 	}
 }
 

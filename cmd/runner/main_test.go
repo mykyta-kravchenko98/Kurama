@@ -311,6 +311,8 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 		t.Fatalf("startMetricsServer() error = %v", err)
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
+	assertHTTPStatus(t, client, "http://"+server.address+runner.HealthPath, http.StatusOK)
+	assertHTTPStatus(t, client, "http://"+server.address+runner.ReadinessPath, http.StatusOK)
 	response, err := client.Get("http://" + server.address + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
@@ -343,6 +345,21 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func assertHTTPStatus(t *testing.T, client *http.Client, url string, want int) {
+	t.Helper()
+	response, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	closeErr := response.Body.Close()
+	if closeErr != nil {
+		t.Fatalf("close %s response: %v", url, closeErr)
+	}
+	if response.StatusCode != want {
+		t.Fatalf("GET %s status = %d, want %d", url, response.StatusCode, want)
 	}
 }
 

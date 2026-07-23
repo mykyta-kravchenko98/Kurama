@@ -8,6 +8,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
@@ -16,6 +17,8 @@ import (
 )
 
 var scheme = runtime.NewScheme()
+
+const healthProbeBindAddress = ":8081"
 
 func init() {
 	mustRegister(clientgoscheme.AddToScheme)
@@ -59,7 +62,8 @@ func main() {
 	redisAddress := os.Getenv(runner.RedisAddressEnv)
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
+		Scheme:                 scheme,
+		HealthProbeBindAddress: healthProbeBindAddress,
 		Cache: cache.Options{
 			DefaultNamespaces: watchNamespaces(),
 		},
@@ -78,6 +82,14 @@ func main() {
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to set up TrafficScenario controller")
+		os.Exit(1)
+	}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		logger.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		logger.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
