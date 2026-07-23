@@ -284,31 +284,26 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	t.Parallel()
 
 	registry := prometheus.NewRegistry()
-	observer, err := runner.NewPrometheusStoreObserver(registry)
-	if err != nil {
-		t.Fatalf("NewPrometheusStoreObserver() error = %v", err)
-	}
 	underlying, err := runner.NewMemoryStore([]runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("NewMemoryStore() error = %v", err)
 	}
-	store, err := runner.NewInstrumentedStore(underlying, "memory", observer)
-	if err != nil {
-		t.Fatalf("NewInstrumentedStore() error = %v", err)
+	state := &runtimeState{
+		ValueStore: underlying,
+		Limiter:    ratelimit.NewLocalLimiter(),
+		Schedule:   rateschedule.NewFixed(76),
 	}
-	if err := store.Put(context.Background(), "hashes", "value"); err != nil {
+	if err := instrumentRuntimeState(registry, state, "memory", "local", "fixed"); err != nil {
+		t.Fatalf("instrumentRuntimeState() error = %v", err)
+	}
+	if err := state.Put(context.Background(), "hashes", "value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	limiterObserver, err := ratelimit.NewPrometheusObserver(registry)
-	if err != nil {
-		t.Fatalf("NewPrometheusObserver() error = %v", err)
-	}
-	limiter, err := ratelimit.NewInstrumentedLimiter(ratelimit.NewLocalLimiter(), "memory", limiterObserver)
-	if err != nil {
-		t.Fatalf("NewInstrumentedLimiter() error = %v", err)
-	}
-	if _, err := limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute}); err != nil {
+	if _, err := state.Limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute}); err != nil {
 		t.Fatalf("TryAcquire() error = %v", err)
+	}
+	if _, err := state.Schedule.RequestsPerMinute(context.Background()); err != nil {
+		t.Fatalf("RequestsPerMinute() error = %v", err)
 	}
 
 	server, err := startMetricsServer("127.0.0.1:0", registry)
@@ -334,14 +329,30 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	if !strings.Contains(string(body), `kurama_store_operations_total{backend="memory",operation="put",result="success",store="hashes"} 1`) {
 		t.Fatalf("/metrics response does not contain store counter:\n%s", body)
 	}
-	if !strings.Contains(string(body), `kurama_rate_limiter_acquisitions_total{backend="memory",result="allowed"} 1`) {
+	if !strings.Contains(string(body), `kurama_rate_limiter_acquisitions_total{backend="local",result="allowed"} 1`) {
 		t.Fatalf("/metrics response does not contain rate limiter counter:\n%s", body)
+	}
+	if !strings.Contains(string(body), `kurama_rate_schedule_requests_per_minute{type="fixed"} 76`) {
+		t.Fatalf("/metrics response does not contain current rate schedule RPM:\n%s", body)
+	}
+	if !strings.Contains(string(body), `kurama_rate_schedule_resolutions_total{result="success",type="fixed"} 1`) {
+		t.Fatalf("/metrics response does not contain rate schedule counter:\n%s", body)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func TestRuntimeHelpersRejectNilState(t *testing.T) {
+	t.Parallel()
+	if err := instrumentRuntimeState(prometheus.NewRegistry(), nil, "memory", "local", "fixed"); err == nil {
+		t.Fatal("instrumentRuntimeState() error = nil")
+	}
+	if _, err := newRunnerScheduler(runner.Config{}, nil); err == nil {
+		t.Fatal("newRunnerScheduler() error = nil")
 	}
 }
 
