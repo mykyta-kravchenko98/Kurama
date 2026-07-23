@@ -77,8 +77,8 @@ func NewScheduler(
 	executor OperationExecutor,
 	options ...SchedulerOption,
 ) (*Scheduler, error) {
-	if rate.RequestsPerMinute < 1 || rate.RequestsPerMinute > MaxRequestsPerMinute {
-		return nil, fmt.Errorf("rate.requestsPerMinute must be between 1 and %d", MaxRequestsPerMinute)
+	if err := validateRateSchedule(rate.Schedule); err != nil {
+		return nil, err
 	}
 	if len(operations) == 0 || len(operations) > MaxOperations {
 		return nil, fmt.Errorf("operations must contain between 1 and %d entries", MaxOperations)
@@ -99,6 +99,10 @@ func NewScheduler(
 	if err != nil {
 		return nil, fmt.Errorf("create traffic profile: %w", err)
 	}
+	var defaultSchedule rateschedule.Schedule
+	if rate.Schedule.Type == "fixed" {
+		defaultSchedule = rateschedule.NewFixed(rate.Schedule.RequestsPerMinute)
+	}
 
 	scheduler := &Scheduler{
 		profile:    delayProfile,
@@ -108,10 +112,13 @@ func NewScheduler(
 		handle:     logExecution,
 		wait:       waitWithTimer,
 		limiter:    ratelimit.NewLocalLimiter(),
-		schedule:   rateschedule.NewFixed(rate.RequestsPerMinute),
+		schedule:   defaultSchedule,
 	}
 	for _, option := range options {
 		option(scheduler)
+	}
+	if scheduler.schedule == nil {
+		return nil, fmt.Errorf("rate.schedule %q requires an external schedule implementation", rate.Schedule.Type)
 	}
 	return scheduler, nil
 }

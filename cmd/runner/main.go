@@ -19,6 +19,7 @@ import (
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rateschedule"
 )
 
 const (
@@ -36,8 +37,9 @@ type storeSettings struct {
 
 type runtimeState struct {
 	runner.ValueStore
-	Limiter ratelimit.Limiter
-	close   func() error
+	Limiter  ratelimit.Limiter
+	Schedule rateschedule.Schedule
+	close    func() error
 }
 
 type metricsServer struct {
@@ -76,7 +78,7 @@ func runWithMetricsAddress(
 	}
 	settings := storeSettingsFromEnv()
 	limiterBackend := normalizedRateLimiterBackend(config.Rate.Limiter, settings.Backend)
-	state, err := newRuntimeState(ctx, settings, limiterBackend, config.Stores)
+	state, err := newRuntimeState(ctx, settings, limiterBackend, config.Rate.Schedule, config.Stores)
 	if err != nil {
 		return fmt.Errorf("create runner state: %w", err)
 	}
@@ -116,8 +118,10 @@ func runWithMetricsAddress(
 	if err != nil {
 		return fmt.Errorf("create HTTP executor: %w", err)
 	}
-	options := make([]runner.SchedulerOption, 0, len(schedulerOptions)+1)
-	options = append(options, runner.WithRateLimiter(state.Limiter))
+	options := []runner.SchedulerOption{
+		runner.WithRateLimiter(state.Limiter),
+		runner.WithRateSchedule(state.Schedule),
+	}
 	options = append(options, schedulerOptions...)
 	scheduler, err := runner.NewScheduler(config.Rate, config.Operations, executor, options...)
 	if err != nil {
@@ -141,8 +145,8 @@ func runWithMetricsAddress(
 		"storeBackend", normalizedStoreBackend(settings.Backend),
 		"rateLimiterBackend", limiterBackend,
 		"rateProfile", normalizedRateProfileType(config.Rate.Profile),
+		"rateSchedule", config.Rate.Schedule.Type,
 		"target", config.Target.BaseURL,
-		"requestsPerMinute", config.Rate.RequestsPerMinute,
 		"operations", len(config.Operations),
 		"stores", len(config.Stores),
 	)
@@ -202,6 +206,7 @@ func newRuntimeState(
 	ctx context.Context,
 	settings storeSettings,
 	limiterBackend string,
+	scheduleConfig runner.RateScheduleConfig,
 	configs []runner.StoreConfig,
 ) (*runtimeState, error) {
 	storeBackend := normalizedStoreBackend(settings.Backend)
@@ -214,7 +219,7 @@ func newRuntimeState(
 
 	var client *redis.Client
 	closeState := func() error { return nil }
-	if storeBackend == "redis" || limiterBackend == "redis" {
+	if storeBackend == "redis" || limiterBackend == "redis" || scheduleConfig.Type == "uniform" {
 		if settings.RedisAddress == "" {
 			return nil, fmt.Errorf("%s must be set when Redis is used", runner.RedisAddressEnv)
 		}
@@ -246,15 +251,16 @@ func newRuntimeState(
 	if err != nil {
 		return nil, errors.Join(err, closeState())
 	}
-	return newRuntimeStateWithLimiter(store, client, closeState, settings, limiterBackend)
+	return newRuntimeStateWithComponents(store, client, closeState, settings, limiterBackend, scheduleConfig)
 }
 
-func newRuntimeStateWithLimiter(
+func newRuntimeStateWithComponents(
 	store runner.ValueStore,
 	client redis.UniversalClient,
 	closeState func() error,
 	settings storeSettings,
 	limiterBackend string,
+	scheduleConfig runner.RateScheduleConfig,
 ) (*runtimeState, error) {
 	var limiter ratelimit.Limiter
 	switch limiterBackend {
@@ -270,7 +276,29 @@ func newRuntimeStateWithLimiter(
 		}
 		limiter = redisLimiter
 	}
-	return &runtimeState{ValueStore: store, Limiter: limiter, close: closeState}, nil
+
+	var schedule rateschedule.Schedule
+	switch scheduleConfig.Type {
+	case "fixed":
+		schedule = rateschedule.NewFixed(scheduleConfig.RequestsPerMinute)
+	case "uniform":
+		redisSchedule, err := rateschedule.NewRedisUniform(
+			client,
+			rateschedule.RedisUniformScope{Namespace: settings.Namespace, Scenario: settings.Scenario},
+			rateschedule.RedisUniformConfig{
+				MinRequestsPerMinute: scheduleConfig.MinRequestsPerMinute,
+				MaxRequestsPerMinute: scheduleConfig.MaxRequestsPerMinute,
+				Window:               time.Duration(scheduleConfig.WindowMinutes) * time.Minute,
+			},
+		)
+		if err != nil {
+			return nil, errors.Join(err, closeState())
+		}
+		schedule = redisSchedule
+	default:
+		return nil, errors.Join(fmt.Errorf("rate schedule type %q is unsupported", scheduleConfig.Type), closeState())
+	}
+	return &runtimeState{ValueStore: store, Limiter: limiter, Schedule: schedule, close: closeState}, nil
 }
 
 func normalizedStoreBackend(backend string) string {

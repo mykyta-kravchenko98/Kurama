@@ -221,7 +221,8 @@ func rateProfileType(scenario *trafficv1alpha1.TrafficScenario) string {
 
 func requiresRedis(scenario *trafficv1alpha1.TrafficScenario) bool {
 	return storageBackend(scenario) == string(trafficv1alpha1.StorageTypeRedis) ||
-		rateLimiterBackend(scenario) == string(trafficv1alpha1.RateLimiterTypeRedis)
+		rateLimiterBackend(scenario) == string(trafficv1alpha1.RateLimiterTypeRedis) ||
+		scenario.Spec.Rate.Schedule.Type == trafficv1alpha1.RateScheduleTypeUniform
 }
 
 func storageBackend(scenario *trafficv1alpha1.TrafficScenario) string {
@@ -235,7 +236,13 @@ func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Conf
 	config := runner.Config{
 		Target: runner.TargetConfig{BaseURL: scenario.Spec.Target.BaseURL},
 		Rate: runner.RateConfig{
-			RequestsPerMinute: scenario.Spec.Rate.RequestsPerMinute,
+			Schedule: runner.RateScheduleConfig{
+				Type:                 string(scenario.Spec.Rate.Schedule.Type),
+				RequestsPerMinute:    scenario.Spec.Rate.Schedule.RequestsPerMinute,
+				MinRequestsPerMinute: scenario.Spec.Rate.Schedule.MinRequestsPerMinute,
+				MaxRequestsPerMinute: scenario.Spec.Rate.Schedule.MaxRequestsPerMinute,
+				WindowMinutes:        scenario.Spec.Rate.Schedule.WindowMinutes,
+			},
 			Limiter: &runner.RateLimiterConfig{
 				Type: rateLimiterBackend(scenario),
 			},

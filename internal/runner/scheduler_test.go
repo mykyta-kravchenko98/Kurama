@@ -125,6 +125,25 @@ func TestSchedulerFailsClosedWhenRateScheduleFails(t *testing.T) {
 	}
 }
 
+func TestNewSchedulerAcceptsExternalUniformSchedule(t *testing.T) {
+	t.Parallel()
+	rate := RateConfig{Schedule: RateScheduleConfig{
+		Type:                 "uniform",
+		MinRequestsPerMinute: 2,
+		MaxRequestsPerMinute: 56,
+		WindowMinutes:        1,
+	}}
+	_, err := NewScheduler(
+		rate,
+		schedulerOperations(),
+		&recordingExecutor{},
+		WithRateSchedule(fixedTestSchedule{requestsPerMinute: 45}),
+	)
+	if err != nil {
+		t.Fatalf("NewScheduler() error = %v", err)
+	}
+}
+
 func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	t.Parallel()
 	operations := []OperationConfig{
@@ -133,7 +152,7 @@ func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	}
 	executor := &recordingExecutor{execute: func(OperationConfig) error { return ErrStoreValueUnavailable }}
 	scheduler, err := NewScheduler(
-		RateConfig{RequestsPerMinute: 30},
+		fixedRateConfig(45),
 		operations,
 		executor,
 		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
@@ -202,14 +221,17 @@ func TestNewSchedulerValidatesInputs(t *testing.T) {
 		operations []OperationConfig
 		executor   OperationExecutor
 	}{
-		{name: "zero RPM", rate: RateConfig{}, operations: schedulerOperations(), executor: executor},
-		{name: "no operations", rate: RateConfig{RequestsPerMinute: 30}, executor: executor},
-		{name: "zero weight", rate: RateConfig{RequestsPerMinute: 30}, operations: []OperationConfig{{Name: "get"}}, executor: executor},
-		{name: "nil executor", rate: RateConfig{RequestsPerMinute: 30}, operations: schedulerOperations()},
+		{name: "missing schedule", rate: RateConfig{}, operations: schedulerOperations(), executor: executor},
+		{name: "no operations", rate: fixedRateConfig(30), executor: executor},
+		{name: "zero weight", rate: fixedRateConfig(30), operations: []OperationConfig{{Name: "get"}}, executor: executor},
+		{name: "nil executor", rate: fixedRateConfig(30), operations: schedulerOperations()},
 		{name: "unknown profile", rate: RateConfig{
-			RequestsPerMinute: 30,
-			Profile:           &RateProfileConfig{Type: "burst"},
+			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
+			Profile:  &RateProfileConfig{Type: "burst"},
 		}, operations: schedulerOperations(), executor: executor},
+		{name: "uniform without external implementation", rate: RateConfig{Schedule: RateScheduleConfig{
+			Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+		}}, operations: schedulerOperations(), executor: executor},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -233,7 +255,7 @@ func newTestScheduler(t *testing.T, executor OperationExecutor, options ...Sched
 	t.Helper()
 	options = append(options, WithExecutionHandler(func(ExecutionResult, error) {}))
 	scheduler, err := NewScheduler(
-		RateConfig{RequestsPerMinute: 30},
+		fixedRateConfig(30),
 		schedulerOperations(),
 		executor,
 		options...,
@@ -242,6 +264,10 @@ func newTestScheduler(t *testing.T, executor OperationExecutor, options ...Sched
 		t.Fatal(err)
 	}
 	return scheduler
+}
+
+func fixedRateConfig(requestsPerMinute int) RateConfig {
+	return RateConfig{Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: requestsPerMinute}}
 }
 
 type sequenceRandomSource struct {

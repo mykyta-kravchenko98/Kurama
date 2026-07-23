@@ -22,10 +22,11 @@ const (
 	// capture. The executor will read one additional byte to detect overflow.
 	MaxResponseBodyBytes = 1 << 20
 
-	MaxRequestsPerMinute = 6_000
-	MaxOperations        = 64
-	MaxStores            = 32
-	MaxStoreCapacity     = 100_000
+	MaxRequestsPerMinute     = 6_000
+	MaxScheduleWindowMinutes = 1_440
+	MaxOperations            = 64
+	MaxStores                = 32
+	MaxStoreCapacity         = 100_000
 )
 
 var (
@@ -48,9 +49,9 @@ type TargetConfig struct {
 }
 
 type RateConfig struct {
-	RequestsPerMinute int                `json:"requestsPerMinute"`
-	Limiter           *RateLimiterConfig `json:"limiter,omitempty"`
-	Profile           *RateProfileConfig `json:"profile,omitempty"`
+	Schedule RateScheduleConfig `json:"schedule"`
+	Limiter  *RateLimiterConfig `json:"limiter,omitempty"`
+	Profile  *RateProfileConfig `json:"profile,omitempty"`
 }
 
 type RateLimiterConfig struct {
@@ -59,6 +60,14 @@ type RateLimiterConfig struct {
 
 type RateProfileConfig struct {
 	Type string `json:"type,omitempty"`
+}
+
+type RateScheduleConfig struct {
+	Type                 string `json:"type"`
+	RequestsPerMinute    int    `json:"requestsPerMinute,omitempty"`
+	MinRequestsPerMinute int    `json:"minRequestsPerMinute,omitempty"`
+	MaxRequestsPerMinute int    `json:"maxRequestsPerMinute,omitempty"`
+	WindowMinutes        int    `json:"windowMinutes,omitempty"`
 }
 
 type StoreConfig struct {
@@ -147,8 +156,8 @@ func (c Config) Validate() error {
 	if err := validateTarget(c.Target); err != nil {
 		return err
 	}
-	if c.Rate.RequestsPerMinute < 1 || c.Rate.RequestsPerMinute > MaxRequestsPerMinute {
-		return fmt.Errorf("rate.requestsPerMinute must be between 1 and %d", MaxRequestsPerMinute)
+	if err := validateRateSchedule(c.Rate.Schedule); err != nil {
+		return err
 	}
 	if c.Rate.Limiter != nil {
 		switch c.Rate.Limiter.Type {
@@ -194,6 +203,34 @@ func (c Config) Validate() error {
 			return fmt.Errorf("operations[%d].name %q is duplicated", i, operation.Name)
 		}
 		operationNames[operation.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateRateSchedule(schedule RateScheduleConfig) error {
+	switch schedule.Type {
+	case "fixed":
+		if schedule.RequestsPerMinute < 1 || schedule.RequestsPerMinute > MaxRequestsPerMinute {
+			return fmt.Errorf("rate.schedule.requestsPerMinute must be between 1 and %d for fixed schedule", MaxRequestsPerMinute)
+		}
+		if schedule.MinRequestsPerMinute != 0 || schedule.MaxRequestsPerMinute != 0 || schedule.WindowMinutes != 0 {
+			return fmt.Errorf("rate.schedule fixed must not set uniform schedule fields")
+		}
+	case "uniform":
+		if schedule.RequestsPerMinute != 0 {
+			return fmt.Errorf("rate.schedule uniform must not set requestsPerMinute")
+		}
+		if schedule.MinRequestsPerMinute < 1 || schedule.MinRequestsPerMinute > MaxRequestsPerMinute {
+			return fmt.Errorf("rate.schedule.minRequestsPerMinute must be between 1 and %d", MaxRequestsPerMinute)
+		}
+		if schedule.MaxRequestsPerMinute < schedule.MinRequestsPerMinute || schedule.MaxRequestsPerMinute > MaxRequestsPerMinute {
+			return fmt.Errorf("rate.schedule.maxRequestsPerMinute must be between minRequestsPerMinute and %d", MaxRequestsPerMinute)
+		}
+		if schedule.WindowMinutes < 1 || schedule.WindowMinutes > MaxScheduleWindowMinutes {
+			return fmt.Errorf("rate.schedule.windowMinutes must be between 1 and %d", MaxScheduleWindowMinutes)
+		}
+	default:
+		return fmt.Errorf("rate.schedule.type %q is unsupported; use fixed or uniform", schedule.Type)
 	}
 	return nil
 }

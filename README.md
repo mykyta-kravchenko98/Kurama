@@ -111,13 +111,13 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 ### Phase 4 — dynamic traffic profiles
 
-- Kept fixed scheduling as the default and added a uniform-random delay
-  profile with the configured requests-per-minute value as its mean rate.
+- Kept fixed request timing as the default and added a uniform-random delay
+  profile using the current schedule RPM as its mean rate.
 - Added a Redis-backed distributed rate limiter and replica configuration, so
   multiple runners share one request budget.
+- Added fixed and Redis-coordinated uniform schedules, allowing one shared RPM
+  value to be selected for each configured time window.
 - Add normal and burst traffic profiles.
-- Allow the requests-per-minute value to change between configured time
-  windows.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.
 - Compare dynamic load profiles through the dashboards maintained in
@@ -141,6 +141,42 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Executing arbitrary scripts or templates from a custom resource.
 - Storing API credentials in Git or in `TrafficScenario.spec`.
 - Supporting every transport before HTTP scenarios are reliable.
+
+## Rate schedule configuration
+
+The rate schedule owns the request rate. A constant schedule is configured as:
+
+```yaml
+rate:
+  schedule:
+    type: fixed
+    requestsPerMinute: 45
+  limiter:
+    type: redis
+  profile:
+    type: uniform
+```
+
+A dynamic schedule selects one inclusive uniformly distributed RPM value for
+each window. Redis time defines the window boundary and all runner replicas use
+the same selected value:
+
+```yaml
+rate:
+  schedule:
+    type: uniform
+    minRequestsPerMinute: 2
+    maxRequestsPerMinute: 56
+    windowMinutes: 1
+  limiter:
+    type: redis
+  profile:
+    type: uniform
+```
+
+Uniform schedules require the controller Redis address. `profile` controls
+when attempts occur within the selected rate, while `limiter` enforces the
+shared request budget.
 
 ## Development
 

@@ -9,7 +9,7 @@ type TargetSpec struct {
 }
 
 type RateSpec struct {
-	RequestsPerMinute int `json:"requestsPerMinute"`
+	Schedule RateScheduleSpec `json:"schedule"`
 	// Limiter selects how request permits are coordinated. When omitted, the
 	// controller preserves the existing behaviour: memory storage uses a local
 	// limiter and Redis storage uses a distributed Redis limiter.
@@ -19,6 +19,34 @@ type RateSpec struct {
 	// original fixed-interval scheduling behaviour is preserved.
 	// +optional
 	Profile *RateProfileSpec `json:"profile,omitempty"`
+}
+
+type RateScheduleType string
+
+const (
+	RateScheduleTypeFixed   RateScheduleType = "fixed"
+	RateScheduleTypeUniform RateScheduleType = "uniform"
+)
+
+type RateScheduleSpec struct {
+	// +kubebuilder:validation:Enum=fixed;uniform
+	Type RateScheduleType `json:"type"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	RequestsPerMinute int `json:"requestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	MinRequestsPerMinute int `json:"minRequestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	MaxRequestsPerMinute int `json:"maxRequestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1440
+	// +optional
+	WindowMinutes int `json:"windowMinutes,omitempty"`
 }
 
 type RateLimiterType string
