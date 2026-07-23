@@ -92,6 +92,21 @@ func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
 	}
 }
 
+func TestSchedulerPassesCurrentScheduleRateToLimiter(t *testing.T) {
+	t.Parallel()
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	scheduler := newTestScheduler(t, &recordingExecutor{},
+		WithRateLimiter(limiter),
+		WithRateSchedule(fixedTestSchedule{requestsPerMinute: 45}),
+	)
+
+	scheduler.executeSlot(context.Background())
+	want := ratelimit.Limit{Requests: 45, Window: time.Minute}
+	if limiter.limit != want {
+		t.Fatalf("limit = %#v; want %#v", limiter.limit, want)
+	}
+}
+
 func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	t.Parallel()
 	operations := []OperationConfig{
@@ -221,6 +236,14 @@ type recordingRateLimiter struct {
 	err      error
 	limit    ratelimit.Limit
 	calls    int
+}
+
+type fixedTestSchedule struct {
+	requestsPerMinute int
+}
+
+func (s fixedTestSchedule) RequestsPerMinute(time.Time) int {
+	return s.requestsPerMinute
 }
 
 func (l *recordingRateLimiter) TryAcquire(_ context.Context, limit ratelimit.Limit) (ratelimit.Decision, error) {

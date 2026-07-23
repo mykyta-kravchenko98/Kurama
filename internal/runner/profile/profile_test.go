@@ -7,22 +7,22 @@ import (
 
 func TestFixedProfileUsesConfiguredMeanDelay(t *testing.T) {
 	t.Parallel()
-	profile, err := New(TypeFixed, 30)
+	profile, err := New(TypeFixed)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if got := profile.NextDelay(); got != 2*time.Second {
+	if got := profile.NextDelay(30); got != 2*time.Second {
 		t.Fatalf("NextDelay() = %s, want 2s", got)
 	}
 }
 
 func TestEmptyProfileTypeDefaultsToFixed(t *testing.T) {
 	t.Parallel()
-	profile, err := New("", 60)
+	profile, err := New("")
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	if got := profile.NextDelay(); got != time.Second {
+	if got := profile.NextDelay(60); got != time.Second {
 		t.Fatalf("NextDelay() = %s, want 1s", got)
 	}
 }
@@ -30,14 +30,14 @@ func TestEmptyProfileTypeDefaultsToFixed(t *testing.T) {
 func TestUniformProfileUsesFullRangeAroundMean(t *testing.T) {
 	t.Parallel()
 	random := &sequenceRandomSource{values: []int64{0, int64(4*time.Second) - 1}}
-	profile, err := newWithRandomSource(TypeUniform, 30, random)
+	profile, err := newWithRandomSource(TypeUniform, random)
 	if err != nil {
 		t.Fatalf("newWithRandomSource() error = %v", err)
 	}
-	if got := profile.NextDelay(); got != time.Nanosecond {
+	if got := profile.NextDelay(30); got != time.Nanosecond {
 		t.Fatalf("minimum NextDelay() = %s, want 1ns", got)
 	}
-	if got := profile.NextDelay(); got != 4*time.Second {
+	if got := profile.NextDelay(30); got != 4*time.Second {
 		t.Fatalf("maximum NextDelay() = %s, want 4s", got)
 	}
 }
@@ -47,15 +47,13 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name        string
 		profileType string
-		rpm         int
 	}{
-		{name: "zero RPM", profileType: TypeFixed},
-		{name: "unknown profile", profileType: "burst", rpm: 30},
+		{name: "unknown profile", profileType: "burst"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := New(test.profileType, test.rpm); err == nil {
+			if _, err := New(test.profileType); err == nil {
 				t.Fatal("New() error = nil")
 			}
 		})

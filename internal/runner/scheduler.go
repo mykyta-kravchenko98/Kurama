@@ -11,6 +11,7 @@ import (
 
 	trafficprofile "github.com/mykyta-kravchenko98/Kurama/internal/runner/profile"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rateschedule"
 )
 
 // OperationExecutor is implemented by Executor and kept small so scheduler
@@ -33,7 +34,8 @@ type Scheduler struct {
 	handle     ExecutionHandler
 	wait       waitForDelay
 	limiter    ratelimit.Limiter
-	limit      ratelimit.Limit
+	schedule   rateschedule.Schedule
+	now        func() time.Time
 }
 
 type SchedulerOption func(*Scheduler)
@@ -62,6 +64,14 @@ func WithRateLimiter(limiter ratelimit.Limiter) SchedulerOption {
 	}
 }
 
+func WithRateSchedule(schedule rateschedule.Schedule) SchedulerOption {
+	return func(scheduler *Scheduler) {
+		if schedule != nil {
+			scheduler.schedule = schedule
+		}
+	}
+}
+
 func NewScheduler(
 	rate RateConfig,
 	operations []OperationConfig,
@@ -86,7 +96,7 @@ func NewScheduler(
 	if rate.Profile != nil {
 		profileType = rate.Profile.Type
 	}
-	delayProfile, err := trafficprofile.New(profileType, rate.RequestsPerMinute)
+	delayProfile, err := trafficprofile.New(profileType)
 	if err != nil {
 		return nil, fmt.Errorf("create traffic profile: %w", err)
 	}
@@ -99,10 +109,8 @@ func NewScheduler(
 		handle:     logExecution,
 		wait:       waitWithTimer,
 		limiter:    ratelimit.NewLocalLimiter(),
-		limit: ratelimit.Limit{
-			Requests: rate.RequestsPerMinute,
-			Window:   time.Minute,
-		},
+		schedule:   rateschedule.NewFixed(rate.RequestsPerMinute),
+		now:        time.Now,
 	}
 	for _, option := range options {
 		option(scheduler)
@@ -120,7 +128,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	s.executeSlot(ctx)
 
 	for {
-		if !s.wait(ctx, s.profile.NextDelay()) {
+		requestsPerMinute := s.schedule.RequestsPerMinute(s.now())
+		if !s.wait(ctx, s.profile.NextDelay(requestsPerMinute)) {
 			return
 		}
 		s.executeSlot(ctx)
@@ -128,7 +137,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) executeSlot(ctx context.Context) {
-	decision, err := s.limiter.TryAcquire(ctx, s.limit)
+	requestsPerMinute := s.schedule.RequestsPerMinute(s.now())
+	decision, err := s.limiter.TryAcquire(ctx, ratelimit.Limit{
+		Requests: requestsPerMinute,
+		Window:   time.Minute,
+	})
 	if err != nil {
 		slog.Error("Kurama rate limiter failed", "error", err)
 		return
