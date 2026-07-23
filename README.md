@@ -121,6 +121,8 @@ turning it into an in-house replacement for a complete load-testing platform.
   latency through the runner Prometheus endpoint.
 - Added manager and runner health/readiness endpoints and generated startup,
   liveness and readiness probes for runner Deployments.
+- Kept existing runner replicas available during updates with an explicit
+  zero-unavailable rolling strategy and bounded rollout history/deadline.
 - Add normal and burst traffic profiles.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.

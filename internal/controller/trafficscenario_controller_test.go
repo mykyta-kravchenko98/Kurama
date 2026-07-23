@@ -65,6 +65,7 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
 		t.Fatalf("runner replicas = %v; want 1", deployment.Spec.Replicas)
 	}
+	assertRunnerRolloutStrategy(t, deployment.Spec)
 	if got := envValue(container.Env, runner.StoreBackendEnv); got != "memory" {
 		t.Fatalf("runner store backend = %q, want memory", got)
 	}
@@ -91,6 +92,26 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
+	}
+}
+
+func assertRunnerRolloutStrategy(t *testing.T, spec appsv1.DeploymentSpec) {
+	t.Helper()
+	if spec.RevisionHistoryLimit == nil || *spec.RevisionHistoryLimit != runnerRevisionHistoryLimit {
+		t.Errorf("revisionHistoryLimit = %v, want %d", spec.RevisionHistoryLimit, runnerRevisionHistoryLimit)
+	}
+	if spec.ProgressDeadlineSeconds == nil || *spec.ProgressDeadlineSeconds != runnerProgressDeadlineSeconds {
+		t.Errorf("progressDeadlineSeconds = %v, want %d", spec.ProgressDeadlineSeconds, runnerProgressDeadlineSeconds)
+	}
+	if spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType || spec.Strategy.RollingUpdate == nil {
+		t.Fatalf("runner strategy = %#v; want RollingUpdate", spec.Strategy)
+	}
+	rollingUpdate := spec.Strategy.RollingUpdate
+	if rollingUpdate.MaxUnavailable == nil || rollingUpdate.MaxUnavailable.IntVal != 0 {
+		t.Errorf("maxUnavailable = %v, want 0", rollingUpdate.MaxUnavailable)
+	}
+	if rollingUpdate.MaxSurge == nil || rollingUpdate.MaxSurge.IntVal != 1 {
+		t.Errorf("maxSurge = %v, want 1", rollingUpdate.MaxSurge)
 	}
 }
 

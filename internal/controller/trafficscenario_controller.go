@@ -24,9 +24,11 @@ import (
 )
 
 const (
-	componentLabel       = "app.kubernetes.io/component"
-	scenarioLabel        = "traffic.kurama.dev/scenario"
-	configHashAnnotation = "traffic.kurama.dev/config-hash"
+	componentLabel                = "app.kubernetes.io/component"
+	scenarioLabel                 = "traffic.kurama.dev/scenario"
+	configHashAnnotation          = "traffic.kurama.dev/config-hash"
+	runnerRevisionHistoryLimit    = int32(5)
+	runnerProgressDeadlineSeconds = int32(120)
 )
 
 // TrafficScenarioReconciler turns every active scenario into exactly one
@@ -163,7 +165,16 @@ func desiredDeployment(scenario *trafficv1alpha1.TrafficScenario, name, image, i
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(runnerReplicas(scenario)),
+			Replicas:                ptr.To(runnerReplicas(scenario)),
+			RevisionHistoryLimit:    ptr.To(runnerRevisionHistoryLimit),
+			ProgressDeadlineSeconds: ptr.To(runnerProgressDeadlineSeconds),
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: ptr.To(intstr.FromInt32(0)),
+					MaxSurge:       ptr.To(intstr.FromInt32(1)),
+				},
+			},
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
