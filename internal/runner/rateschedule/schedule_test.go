@@ -1,21 +1,28 @@
 package rateschedule
 
 import (
+	"context"
+	"errors"
 	"testing"
-	"time"
 )
 
 func TestFixedReturnsSameRateAtEveryInstant(t *testing.T) {
 	t.Parallel()
 	schedule := NewFixed(45)
-	times := []time.Time{
-		time.Unix(0, 0),
-		time.Now(),
-		time.Now().Add(24 * time.Hour),
-	}
-	for _, now := range times {
-		if got := schedule.RequestsPerMinute(now); got != 45 {
-			t.Fatalf("RequestsPerMinute(%s) = %d, want 45", now, got)
+	for range 3 {
+		got, err := schedule.RequestsPerMinute(context.Background())
+		if err != nil || got != 45 {
+			t.Fatalf("RequestsPerMinute() = (%d, %v), want (45, nil)", got, err)
 		}
+	}
+}
+
+func TestFixedHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewFixed(45).RequestsPerMinute(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RequestsPerMinute() error = %v, want context.Canceled", err)
 	}
 }

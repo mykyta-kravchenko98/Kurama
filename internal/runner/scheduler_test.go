@@ -107,6 +107,24 @@ func TestSchedulerPassesCurrentScheduleRateToLimiter(t *testing.T) {
 	}
 }
 
+func TestSchedulerFailsClosedWhenRateScheduleFails(t *testing.T) {
+	t.Parallel()
+	executor := &recordingExecutor{}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	scheduler := newTestScheduler(t, executor,
+		WithRateLimiter(limiter),
+		WithRateSchedule(fixedTestSchedule{err: errors.New("redis unavailable")}),
+	)
+
+	scheduler.executeSlot(context.Background())
+	if got := len(executor.operationNames()); got != 0 {
+		t.Fatalf("executions = %d, want 0", got)
+	}
+	if limiter.calls != 0 {
+		t.Fatalf("limiter calls = %d, want 0", limiter.calls)
+	}
+}
+
 func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	t.Parallel()
 	operations := []OperationConfig{
@@ -240,10 +258,11 @@ type recordingRateLimiter struct {
 
 type fixedTestSchedule struct {
 	requestsPerMinute int
+	err               error
 }
 
-func (s fixedTestSchedule) RequestsPerMinute(time.Time) int {
-	return s.requestsPerMinute
+func (s fixedTestSchedule) RequestsPerMinute(context.Context) (int, error) {
+	return s.requestsPerMinute, s.err
 }
 
 func (l *recordingRateLimiter) TryAcquire(_ context.Context, limit ratelimit.Limit) (ratelimit.Decision, error) {

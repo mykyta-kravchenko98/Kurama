@@ -35,7 +35,6 @@ type Scheduler struct {
 	wait       waitForDelay
 	limiter    ratelimit.Limiter
 	schedule   rateschedule.Schedule
-	now        func() time.Time
 }
 
 type SchedulerOption func(*Scheduler)
@@ -110,7 +109,6 @@ func NewScheduler(
 		wait:       waitWithTimer,
 		limiter:    ratelimit.NewLocalLimiter(),
 		schedule:   rateschedule.NewFixed(rate.RequestsPerMinute),
-		now:        time.Now,
 	}
 	for _, option := range options {
 		option(scheduler)
@@ -122,22 +120,33 @@ func NewScheduler(
 // profile before each subsequent slot. Calls are deliberately sequential: slow
 // targets reduce achieved RPM instead of creating an unbounded request queue.
 func (s *Scheduler) Run(ctx context.Context) {
-	if ctx.Err() != nil {
-		return
-	}
-	s.executeSlot(ctx)
-
 	for {
-		requestsPerMinute := s.schedule.RequestsPerMinute(s.now())
+		requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
+		if !ok {
+			if ctx.Err() != nil {
+				return
+			}
+			if !s.wait(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		s.executeSlotAtRate(ctx, requestsPerMinute)
 		if !s.wait(ctx, s.profile.NextDelay(requestsPerMinute)) {
 			return
 		}
-		s.executeSlot(ctx)
 	}
 }
 
 func (s *Scheduler) executeSlot(ctx context.Context) {
-	requestsPerMinute := s.schedule.RequestsPerMinute(s.now())
+	requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
+	if !ok {
+		return
+	}
+	s.executeSlotAtRate(ctx, requestsPerMinute)
+}
+
+func (s *Scheduler) executeSlotAtRate(ctx context.Context, requestsPerMinute int) {
 	decision, err := s.limiter.TryAcquire(ctx, ratelimit.Limit{
 		Requests: requestsPerMinute,
 		Window:   time.Minute,
@@ -168,6 +177,21 @@ func (s *Scheduler) executeSlot(ctx context.Context) {
 		}
 		excluded[index] = true
 	}
+}
+
+func (s *Scheduler) currentRequestsPerMinute(ctx context.Context) (int, bool) {
+	requestsPerMinute, err := s.schedule.RequestsPerMinute(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("Kurama rate schedule failed", "error", err)
+		}
+		return 0, false
+	}
+	if requestsPerMinute < 1 || requestsPerMinute > MaxRequestsPerMinute {
+		slog.Error("Kurama rate schedule returned invalid RPM", "requestsPerMinute", requestsPerMinute)
+		return 0, false
+	}
+	return requestsPerMinute, true
 }
 
 func pickWeighted(
