@@ -27,7 +27,7 @@ is an ordinary workload Pod, so a failed or busy traffic generator cannot
 block reconciliation of the custom resource.
 
 The supported protocol is currently HTTP/HTTPS. A scenario declares a target,
-weighted request operations, a fixed traffic rate and bounded value stores.
+weighted request operations, a traffic profile and bounded value stores.
 Authentication and Secret references are planned; secret values will never be
 stored directly in the custom resource.
 
@@ -111,13 +111,15 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 ### Phase 4 — dynamic traffic profiles
 
-- Add fixed, uniform random, normal and burst traffic profiles.
-- Allow the requests-per-minute value to change between configured time
-  windows.
+- Kept fixed request timing as the default and added a uniform-random delay
+  profile using the current schedule RPM as its mean rate.
+- Added a Redis-backed distributed rate limiter and replica configuration, so
+  multiple runners share one request budget.
+- Added fixed and Redis-coordinated uniform schedules, allowing one shared RPM
+  value to be selected for each configured time window.
+- Add normal and burst traffic profiles.
 - Make random generation reproducible with an optional scenario seed.
 - Add per-operation rate caps, including protection for APIs with rate limits.
-- Add a Redis-backed distributed rate limiter before scaling a scenario to
-  multiple runner replicas, so replicas share one configured request budget.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
 
@@ -139,6 +141,42 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Executing arbitrary scripts or templates from a custom resource.
 - Storing API credentials in Git or in `TrafficScenario.spec`.
 - Supporting every transport before HTTP scenarios are reliable.
+
+## Rate schedule configuration
+
+The rate schedule owns the request rate. A constant schedule is configured as:
+
+```yaml
+rate:
+  schedule:
+    type: fixed
+    requestsPerMinute: 45
+  limiter:
+    type: redis
+  profile:
+    type: uniform
+```
+
+A dynamic schedule selects one inclusive uniformly distributed RPM value for
+each window. Redis time defines the window boundary and all runner replicas use
+the same selected value:
+
+```yaml
+rate:
+  schedule:
+    type: uniform
+    minRequestsPerMinute: 2
+    maxRequestsPerMinute: 56
+    windowMinutes: 1
+  limiter:
+    type: redis
+  profile:
+    type: uniform
+```
+
+Uniform schedules require the controller Redis address. `profile` controls
+when attempts occur within the selected rate, while `limiter` enforces the
+shared request budget.
 
 ## Development
 

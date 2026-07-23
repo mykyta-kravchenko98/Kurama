@@ -108,6 +108,13 @@ func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
 			return fmt.Errorf("spec.rate.limiter.type %q is unsupported; use local or redis", scenario.Spec.Rate.Limiter.Type)
 		}
 	}
+	if scenario.Spec.Rate.Profile != nil {
+		switch scenario.Spec.Rate.Profile.Type {
+		case "", trafficv1alpha1.RateProfileTypeFixed, trafficv1alpha1.RateProfileTypeUniform:
+		default:
+			return fmt.Errorf("spec.rate.profile.type %q is unsupported; use fixed or uniform", scenario.Spec.Rate.Profile.Type)
+		}
+	}
 	replicas := runnerReplicas(scenario)
 	if replicas < 1 || replicas > 10 {
 		return fmt.Errorf("spec.replicas must be between 1 and 10")
@@ -205,9 +212,17 @@ func rateLimiterBackend(scenario *trafficv1alpha1.TrafficScenario) string {
 	return string(trafficv1alpha1.RateLimiterTypeLocal)
 }
 
+func rateProfileType(scenario *trafficv1alpha1.TrafficScenario) string {
+	if scenario.Spec.Rate.Profile == nil || scenario.Spec.Rate.Profile.Type == "" {
+		return string(trafficv1alpha1.RateProfileTypeFixed)
+	}
+	return string(scenario.Spec.Rate.Profile.Type)
+}
+
 func requiresRedis(scenario *trafficv1alpha1.TrafficScenario) bool {
 	return storageBackend(scenario) == string(trafficv1alpha1.StorageTypeRedis) ||
-		rateLimiterBackend(scenario) == string(trafficv1alpha1.RateLimiterTypeRedis)
+		rateLimiterBackend(scenario) == string(trafficv1alpha1.RateLimiterTypeRedis) ||
+		scenario.Spec.Rate.Schedule.Type == trafficv1alpha1.RateScheduleTypeUniform
 }
 
 func storageBackend(scenario *trafficv1alpha1.TrafficScenario) string {
@@ -221,9 +236,18 @@ func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Conf
 	config := runner.Config{
 		Target: runner.TargetConfig{BaseURL: scenario.Spec.Target.BaseURL},
 		Rate: runner.RateConfig{
-			RequestsPerMinute: scenario.Spec.Rate.RequestsPerMinute,
+			Schedule: runner.RateScheduleConfig{
+				Type:                 string(scenario.Spec.Rate.Schedule.Type),
+				RequestsPerMinute:    scenario.Spec.Rate.Schedule.RequestsPerMinute,
+				MinRequestsPerMinute: scenario.Spec.Rate.Schedule.MinRequestsPerMinute,
+				MaxRequestsPerMinute: scenario.Spec.Rate.Schedule.MaxRequestsPerMinute,
+				WindowMinutes:        scenario.Spec.Rate.Schedule.WindowMinutes,
+			},
 			Limiter: &runner.RateLimiterConfig{
 				Type: rateLimiterBackend(scenario),
+			},
+			Profile: &runner.RateProfileConfig{
+				Type: rateProfileType(scenario),
 			},
 		},
 		Stores:     make([]runner.StoreConfig, len(scenario.Spec.Stores)),

@@ -134,7 +134,7 @@ spec:
                 rate:
                   type: object
                   required:
-                    - requestsPerMinute
+                    - schedule
                   properties:
                     limiter:
                       type: object
@@ -144,10 +144,40 @@ spec:
                           enum:
                             - local
                             - redis
-                    requestsPerMinute:
-                      type: integer
-                      minimum: 1
-                      maximum: 6000
+                    profile:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - fixed
+                            - uniform
+                    schedule:
+                      type: object
+                      required:
+                        - type
+                      properties:
+                        type:
+                          type: string
+                          enum:
+                            - fixed
+                            - uniform
+                        requestsPerMinute:
+                          type: integer
+                          minimum: 1
+                          maximum: 6000
+                        minRequestsPerMinute:
+                          type: integer
+                          minimum: 1
+                          maximum: 6000
+                        maxRequestsPerMinute:
+                          type: integer
+                          minimum: 1
+                          maximum: 6000
+                        windowMinutes:
+                          type: integer
+                          minimum: 1
+                          maximum: 1440
                 replicas:
                   type: integer
                   format: int32

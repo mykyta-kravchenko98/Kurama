@@ -5,7 +5,6 @@ import (
 	"errors"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,6 +92,58 @@ func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
 	}
 }
 
+func TestSchedulerPassesCurrentScheduleRateToLimiter(t *testing.T) {
+	t.Parallel()
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	scheduler := newTestScheduler(t, &recordingExecutor{},
+		WithRateLimiter(limiter),
+		WithRateSchedule(fixedTestSchedule{requestsPerMinute: 45}),
+	)
+
+	scheduler.executeSlot(context.Background())
+	want := ratelimit.Limit{Requests: 45, Window: time.Minute}
+	if limiter.limit != want {
+		t.Fatalf("limit = %#v; want %#v", limiter.limit, want)
+	}
+}
+
+func TestSchedulerFailsClosedWhenRateScheduleFails(t *testing.T) {
+	t.Parallel()
+	executor := &recordingExecutor{}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	scheduler := newTestScheduler(t, executor,
+		WithRateLimiter(limiter),
+		WithRateSchedule(fixedTestSchedule{err: errors.New("redis unavailable")}),
+	)
+
+	scheduler.executeSlot(context.Background())
+	if got := len(executor.operationNames()); got != 0 {
+		t.Fatalf("executions = %d, want 0", got)
+	}
+	if limiter.calls != 0 {
+		t.Fatalf("limiter calls = %d, want 0", limiter.calls)
+	}
+}
+
+func TestNewSchedulerAcceptsExternalUniformSchedule(t *testing.T) {
+	t.Parallel()
+	rate := RateConfig{Schedule: RateScheduleConfig{
+		Type:                 "uniform",
+		MinRequestsPerMinute: 2,
+		MaxRequestsPerMinute: 56,
+		WindowMinutes:        1,
+	}}
+	_, err := NewScheduler(
+		rate,
+		schedulerOperations(),
+		&recordingExecutor{},
+		WithRateSchedule(fixedTestSchedule{requestsPerMinute: 45}),
+	)
+	if err != nil {
+		t.Fatalf("NewScheduler() error = %v", err)
+	}
+}
+
 func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	t.Parallel()
 	operations := []OperationConfig{
@@ -101,7 +152,7 @@ func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	}
 	executor := &recordingExecutor{execute: func(OperationConfig) error { return ErrStoreValueUnavailable }}
 	scheduler, err := NewScheduler(
-		RateConfig{RequestsPerMinute: 30},
+		fixedRateConfig(45),
 		operations,
 		executor,
 		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
@@ -117,18 +168,22 @@ func TestSchedulerStopsAfterAllOperationsAreUnavailable(t *testing.T) {
 	}
 }
 
-func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
+func TestSchedulerRunExecutesImmediatelyAndAfterProfileDelay(t *testing.T) {
 	t.Parallel()
 	executor := &recordingExecutor{called: make(chan struct{}, 2)}
 	scheduler := newTestScheduler(t, executor,
 		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
 	)
-	ticker := &manualTicker{ticks: make(chan time.Time, 1)}
-	scheduler.newTicker = func(interval time.Duration) schedulerTicker {
-		if interval != 2*time.Second {
-			t.Errorf("ticker interval = %s; want 2s", interval)
+	delays := make(chan time.Duration, 1)
+	release := make(chan struct{}, 1)
+	scheduler.wait = func(ctx context.Context, delay time.Duration) bool {
+		delays <- delay
+		select {
+		case <-ctx.Done():
+			return false
+		case <-release:
+			return true
 		}
-		return ticker
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,7 +193,15 @@ func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
 		close(done)
 	}()
 	waitForExecution(t, executor.called)
-	ticker.ticks <- time.Now()
+	select {
+	case delay := <-delays:
+		if delay != 2*time.Second {
+			t.Fatalf("profile delay = %s; want 2s", delay)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not wait for profile delay")
+	}
+	release <- struct{}{}
 	waitForExecution(t, executor.called)
 	cancel()
 
@@ -146,9 +209,6 @@ func TestSchedulerRunExecutesImmediatelyAndOnTicks(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run() did not stop after context cancellation")
-	}
-	if !ticker.stopped.Load() {
-		t.Fatal("ticker was not stopped")
 	}
 }
 
@@ -161,10 +221,17 @@ func TestNewSchedulerValidatesInputs(t *testing.T) {
 		operations []OperationConfig
 		executor   OperationExecutor
 	}{
-		{name: "zero RPM", rate: RateConfig{}, operations: schedulerOperations(), executor: executor},
-		{name: "no operations", rate: RateConfig{RequestsPerMinute: 30}, executor: executor},
-		{name: "zero weight", rate: RateConfig{RequestsPerMinute: 30}, operations: []OperationConfig{{Name: "get"}}, executor: executor},
-		{name: "nil executor", rate: RateConfig{RequestsPerMinute: 30}, operations: schedulerOperations()},
+		{name: "missing schedule", rate: RateConfig{}, operations: schedulerOperations(), executor: executor},
+		{name: "no operations", rate: fixedRateConfig(30), executor: executor},
+		{name: "zero weight", rate: fixedRateConfig(30), operations: []OperationConfig{{Name: "get"}}, executor: executor},
+		{name: "nil executor", rate: fixedRateConfig(30), operations: schedulerOperations()},
+		{name: "unknown profile", rate: RateConfig{
+			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
+			Profile:  &RateProfileConfig{Type: "burst"},
+		}, operations: schedulerOperations(), executor: executor},
+		{name: "uniform without external implementation", rate: RateConfig{Schedule: RateScheduleConfig{
+			Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+		}}, operations: schedulerOperations(), executor: executor},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -188,7 +255,7 @@ func newTestScheduler(t *testing.T, executor OperationExecutor, options ...Sched
 	t.Helper()
 	options = append(options, WithExecutionHandler(func(ExecutionResult, error) {}))
 	scheduler, err := NewScheduler(
-		RateConfig{RequestsPerMinute: 30},
+		fixedRateConfig(30),
 		schedulerOperations(),
 		executor,
 		options...,
@@ -197,6 +264,10 @@ func newTestScheduler(t *testing.T, executor OperationExecutor, options ...Sched
 		t.Fatal(err)
 	}
 	return scheduler
+}
+
+func fixedRateConfig(requestsPerMinute int) RateConfig {
+	return RateConfig{Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: requestsPerMinute}}
 }
 
 type sequenceRandomSource struct {
@@ -209,6 +280,15 @@ type recordingRateLimiter struct {
 	err      error
 	limit    ratelimit.Limit
 	calls    int
+}
+
+type fixedTestSchedule struct {
+	requestsPerMinute int
+	err               error
+}
+
+func (s fixedTestSchedule) RequestsPerMinute(context.Context) (int, error) {
+	return s.requestsPerMinute, s.err
 }
 
 func (l *recordingRateLimiter) TryAcquire(_ context.Context, limit ratelimit.Limit) (ratelimit.Decision, error) {
@@ -251,19 +331,6 @@ func (e *recordingExecutor) operationNames() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.names...)
-}
-
-type manualTicker struct {
-	ticks   chan time.Time
-	stopped atomic.Bool
-}
-
-func (t *manualTicker) C() <-chan time.Time {
-	return t.ticks
-}
-
-func (t *manualTicker) Stop() {
-	t.stopped.Store(true)
 }
 
 func waitForExecution(t *testing.T, calls <-chan struct{}) {

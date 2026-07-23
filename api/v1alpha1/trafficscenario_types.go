@@ -9,12 +9,44 @@ type TargetSpec struct {
 }
 
 type RateSpec struct {
-	RequestsPerMinute int `json:"requestsPerMinute"`
+	Schedule RateScheduleSpec `json:"schedule"`
 	// Limiter selects how request permits are coordinated. When omitted, the
 	// controller preserves the existing behaviour: memory storage uses a local
 	// limiter and Redis storage uses a distributed Redis limiter.
 	// +optional
 	Limiter *RateLimiterSpec `json:"limiter,omitempty"`
+	// Profile controls the delay between request attempts. When omitted, the
+	// original fixed-interval scheduling behaviour is preserved.
+	// +optional
+	Profile *RateProfileSpec `json:"profile,omitempty"`
+}
+
+type RateScheduleType string
+
+const (
+	RateScheduleTypeFixed   RateScheduleType = "fixed"
+	RateScheduleTypeUniform RateScheduleType = "uniform"
+)
+
+type RateScheduleSpec struct {
+	// +kubebuilder:validation:Enum=fixed;uniform
+	Type RateScheduleType `json:"type"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	RequestsPerMinute int `json:"requestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	MinRequestsPerMinute int `json:"minRequestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	// +optional
+	MaxRequestsPerMinute int `json:"maxRequestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1440
+	// +optional
+	WindowMinutes int `json:"windowMinutes,omitempty"`
 }
 
 type RateLimiterType string
@@ -28,6 +60,19 @@ type RateLimiterSpec struct {
 	// +kubebuilder:validation:Enum=local;redis
 	// +optional
 	Type RateLimiterType `json:"type,omitempty"`
+}
+
+type RateProfileType string
+
+const (
+	RateProfileTypeFixed   RateProfileType = "fixed"
+	RateProfileTypeUniform RateProfileType = "uniform"
+)
+
+type RateProfileSpec struct {
+	// +kubebuilder:validation:Enum=fixed;uniform
+	// +optional
+	Type RateProfileType `json:"type,omitempty"`
 }
 
 type StoreSpec struct {

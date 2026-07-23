@@ -18,6 +18,7 @@ import (
 
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rateschedule"
 )
 
 func TestRunExecutesConfiguredWorkload(t *testing.T) {
@@ -36,7 +37,9 @@ func TestRunExecutesConfiguredWorkload(t *testing.T) {
 
 	config := runner.Config{
 		Target: runner.TargetConfig{BaseURL: server.URL},
-		Rate:   runner.RateConfig{RequestsPerMinute: 1},
+		Rate: runner.RateConfig{Schedule: runner.RateScheduleConfig{
+			Type: "fixed", RequestsPerMinute: 1,
+		}},
 		Operations: []runner.OperationConfig{{
 			Name: "health", Weight: 1,
 			Request:             runner.RequestConfig{Method: http.MethodGet, PathTemplate: "/health"},
@@ -78,7 +81,7 @@ func TestLoadConfigReportsMissingFile(t *testing.T) {
 func TestNewRuntimeStateDefaultsToMemory(t *testing.T) {
 	t.Parallel()
 
-	state, err := newRuntimeState(context.Background(), storeSettings{}, "local", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	state, err := newRuntimeState(context.Background(), storeSettings{}, "local", fixedScheduleConfig(30), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
 	}
@@ -96,6 +99,9 @@ func TestNewRuntimeStateDefaultsToMemory(t *testing.T) {
 	if _, ok := state.Limiter.(*ratelimit.LocalLimiter); !ok {
 		t.Fatalf("limiter type = %T; want *ratelimit.LocalLimiter", state.Limiter)
 	}
+	if _, ok := state.Schedule.(rateschedule.Fixed); !ok {
+		t.Fatalf("schedule type = %T; want rateschedule.Fixed", state.Schedule)
+	}
 	assertLimiterAllowsOneRequest(t, state.Limiter)
 }
 
@@ -108,7 +114,7 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
-	}, "redis", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	}, "redis", fixedScheduleConfig(45), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
 	}
@@ -140,7 +146,7 @@ func TestNewRuntimeStateSupportsMemoryStoreWithRedisLimiter(t *testing.T) {
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
-	}, "redis", []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	}, "redis", fixedScheduleConfig(45), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
 	}
@@ -154,6 +160,36 @@ func TestNewRuntimeStateSupportsMemoryStoreWithRedisLimiter(t *testing.T) {
 	}
 	if _, ok := state.Limiter.(*ratelimit.RedisRateLimiter); !ok {
 		t.Fatalf("limiter type = %T; want *ratelimit.RedisRateLimiter", state.Limiter)
+	}
+}
+
+func TestNewRuntimeStateSupportsRedisUniformScheduleWithMemoryStore(t *testing.T) {
+	t.Parallel()
+	server := miniredis.RunT(t)
+	state, err := newRuntimeState(context.Background(), storeSettings{
+		RedisAddress: server.Addr(),
+		Namespace:    "shorturl",
+		Scenario:     "load",
+	}, "local", runner.RateScheduleConfig{
+		Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+	}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newRuntimeState() error = %v", err)
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+	if _, ok := state.ValueStore.(*runner.MemoryStore); !ok {
+		t.Fatalf("store type = %T; want *runner.MemoryStore", state.ValueStore)
+	}
+	if _, ok := state.Schedule.(*rateschedule.RedisUniform); !ok {
+		t.Fatalf("schedule type = %T; want *rateschedule.RedisUniform", state.Schedule)
+	}
+	rpm, err := state.Schedule.RequestsPerMinute(context.Background())
+	if err != nil || rpm < 2 || rpm > 56 {
+		t.Fatalf("RequestsPerMinute() = (%d, %v), want value between 2 and 56", rpm, err)
 	}
 }
 
@@ -181,6 +217,27 @@ func TestNormalizedRateLimiterBackend(t *testing.T) {
 	}
 }
 
+func TestNormalizedRateProfileType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config *runner.RateProfileConfig
+		want   string
+	}{
+		{name: "omitted", want: "fixed"},
+		{name: "empty", config: &runner.RateProfileConfig{}, want: "fixed"},
+		{name: "uniform", config: &runner.RateProfileConfig{Type: "uniform"}, want: "uniform"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizedRateProfileType(test.config); got != test.want {
+				t.Fatalf("normalizedRateProfileType() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
 	t.Parallel()
 
@@ -188,21 +245,28 @@ func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
 		name           string
 		settings       storeSettings
 		limiterBackend string
+		schedule       runner.RateScheduleConfig
 	}{
-		{name: "unknown storage backend", settings: storeSettings{Backend: "postgres"}, limiterBackend: "local"},
-		{name: "unknown limiter backend", limiterBackend: "postgres"},
-		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}, limiterBackend: "redis"},
-		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}, limiterBackend: "redis"},
-		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}, limiterBackend: "redis"},
+		{name: "unknown storage backend", settings: storeSettings{Backend: "postgres"}, limiterBackend: "local", schedule: fixedScheduleConfig(30)},
+		{name: "unknown limiter backend", limiterBackend: "postgres", schedule: fixedScheduleConfig(30)},
+		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "uniform schedule missing Redis address", limiterBackend: "local", schedule: runner.RateScheduleConfig{Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1}},
+		{name: "unknown schedule", limiterBackend: "local", schedule: runner.RateScheduleConfig{Type: "burst"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := newRuntimeState(context.Background(), test.settings, test.limiterBackend, nil); err == nil {
+			if _, err := newRuntimeState(context.Background(), test.settings, test.limiterBackend, test.schedule, nil); err == nil {
 				t.Fatal("newRuntimeState() error = nil")
 			}
 		})
 	}
+}
+
+func fixedScheduleConfig(requestsPerMinute int) runner.RateScheduleConfig {
+	return runner.RateScheduleConfig{Type: "fixed", RequestsPerMinute: requestsPerMinute}
 }
 
 func assertLimiterAllowsOneRequest(t *testing.T, limiter ratelimit.Limiter) {

@@ -9,7 +9,9 @@ import (
 	"slices"
 	"time"
 
+	trafficprofile "github.com/mykyta-kravchenko98/Kurama/internal/runner/profile"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner/ratelimit"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rateschedule"
 )
 
 // OperationExecutor is implemented by Executor and kept small so scheduler
@@ -25,14 +27,14 @@ type WeightedRandomSource interface {
 type ExecutionHandler func(result ExecutionResult, err error)
 
 type Scheduler struct {
-	interval   time.Duration
+	profile    trafficprofile.Timing
 	operations []OperationConfig
 	executor   OperationExecutor
 	random     WeightedRandomSource
 	handle     ExecutionHandler
-	newTicker  tickerFactory
+	wait       waitForDelay
 	limiter    ratelimit.Limiter
-	limit      ratelimit.Limit
+	schedule   rateschedule.Schedule
 }
 
 type SchedulerOption func(*Scheduler)
@@ -61,14 +63,22 @@ func WithRateLimiter(limiter ratelimit.Limiter) SchedulerOption {
 	}
 }
 
+func WithRateSchedule(schedule rateschedule.Schedule) SchedulerOption {
+	return func(scheduler *Scheduler) {
+		if schedule != nil {
+			scheduler.schedule = schedule
+		}
+	}
+}
+
 func NewScheduler(
 	rate RateConfig,
 	operations []OperationConfig,
 	executor OperationExecutor,
 	options ...SchedulerOption,
 ) (*Scheduler, error) {
-	if rate.RequestsPerMinute < 1 || rate.RequestsPerMinute > MaxRequestsPerMinute {
-		return nil, fmt.Errorf("rate.requestsPerMinute must be between 1 and %d", MaxRequestsPerMinute)
+	if err := validateRateSchedule(rate.Schedule); err != nil {
+		return nil, err
 	}
 	if len(operations) == 0 || len(operations) > MaxOperations {
 		return nil, fmt.Errorf("operations must contain between 1 and %d entries", MaxOperations)
@@ -81,49 +91,73 @@ func NewScheduler(
 	if executor == nil {
 		return nil, fmt.Errorf("operation executor must not be nil")
 	}
+	profileType := ""
+	if rate.Profile != nil {
+		profileType = rate.Profile.Type
+	}
+	delayProfile, err := trafficprofile.New(profileType)
+	if err != nil {
+		return nil, fmt.Errorf("create traffic profile: %w", err)
+	}
+	var defaultSchedule rateschedule.Schedule
+	if rate.Schedule.Type == "fixed" {
+		defaultSchedule = rateschedule.NewFixed(rate.Schedule.RequestsPerMinute)
+	}
 
 	scheduler := &Scheduler{
-		interval:   time.Minute / time.Duration(rate.RequestsPerMinute),
+		profile:    delayProfile,
 		operations: slices.Clone(operations),
 		executor:   executor,
 		random:     globalRandomSource{},
 		handle:     logExecution,
-		newTicker:  newRealTicker,
+		wait:       waitWithTimer,
 		limiter:    ratelimit.NewLocalLimiter(),
-		limit: ratelimit.Limit{
-			Requests: rate.RequestsPerMinute,
-			Window:   time.Minute,
-		},
+		schedule:   defaultSchedule,
 	}
 	for _, option := range options {
 		option(scheduler)
 	}
+	if scheduler.schedule == nil {
+		return nil, fmt.Errorf("rate.schedule %q requires an external schedule implementation", rate.Schedule.Type)
+	}
 	return scheduler, nil
 }
 
-// Run executes one operation immediately and then at the configured fixed-RPM
-// interval. Calls are deliberately sequential: slow targets reduce achieved
-// RPM instead of causing an unbounded queue or concurrent request burst.
+// Run executes one operation immediately and then waits for the active traffic
+// profile before each subsequent slot. Calls are deliberately sequential: slow
+// targets reduce achieved RPM instead of creating an unbounded request queue.
 func (s *Scheduler) Run(ctx context.Context) {
-	if ctx.Err() != nil {
-		return
-	}
-	s.executeSlot(ctx)
-
-	ticker := s.newTicker(s.interval)
-	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
+		if !ok {
+			if ctx.Err() != nil {
+				return
+			}
+			if !s.wait(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		s.executeSlotAtRate(ctx, requestsPerMinute)
+		if !s.wait(ctx, s.profile.NextDelay(requestsPerMinute)) {
 			return
-		case <-ticker.C():
-			s.executeSlot(ctx)
 		}
 	}
 }
 
 func (s *Scheduler) executeSlot(ctx context.Context) {
-	decision, err := s.limiter.TryAcquire(ctx, s.limit)
+	requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
+	if !ok {
+		return
+	}
+	s.executeSlotAtRate(ctx, requestsPerMinute)
+}
+
+func (s *Scheduler) executeSlotAtRate(ctx context.Context, requestsPerMinute int) {
+	decision, err := s.limiter.TryAcquire(ctx, ratelimit.Limit{
+		Requests: requestsPerMinute,
+		Window:   time.Minute,
+	})
 	if err != nil {
 		slog.Error("Kurama rate limiter failed", "error", err)
 		return
@@ -150,6 +184,21 @@ func (s *Scheduler) executeSlot(ctx context.Context) {
 		}
 		excluded[index] = true
 	}
+}
+
+func (s *Scheduler) currentRequestsPerMinute(ctx context.Context) (int, bool) {
+	requestsPerMinute, err := s.schedule.RequestsPerMinute(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Error("Kurama rate schedule failed", "error", err)
+		}
+		return 0, false
+	}
+	if requestsPerMinute < 1 || requestsPerMinute > MaxRequestsPerMinute {
+		slog.Error("Kurama rate schedule returned invalid RPM", "requestsPerMinute", requestsPerMinute)
+		return 0, false
+	}
+	return requestsPerMinute, true
 }
 
 func pickWeighted(
@@ -206,25 +255,15 @@ func (globalRandomSource) IntN(n int) int {
 	return rand.IntN(n)
 }
 
-type schedulerTicker interface {
-	C() <-chan time.Time
-	Stop()
-}
+type waitForDelay func(ctx context.Context, delay time.Duration) bool
 
-type tickerFactory func(interval time.Duration) schedulerTicker
-
-type realTicker struct {
-	ticker *time.Ticker
-}
-
-func newRealTicker(interval time.Duration) schedulerTicker {
-	return realTicker{ticker: time.NewTicker(interval)}
-}
-
-func (t realTicker) C() <-chan time.Time {
-	return t.ticker.C
-}
-
-func (t realTicker) Stop() {
-	t.ticker.Stop()
+func waitWithTimer(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

@@ -14,6 +14,17 @@ func TestConfigValidateShortURLScenario(t *testing.T) {
 	}
 }
 
+func TestConfigValidateUniformSchedule(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Rate.Schedule = RateScheduleConfig{
+		Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("valid uniform schedule rejected: %v", err)
+	}
+}
+
 func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -23,10 +34,24 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 	}{
 		{name: "non HTTP target", mutate: func(c *Config) { c.Target.BaseURL = "postgres://db" }, wantErr: "scheme"},
 		{name: "credentials in target", mutate: func(c *Config) { c.Target.BaseURL = "http://user:pass@shorturl:8585" }, wantErr: "credentials"},
-		{name: "zero rate", mutate: func(c *Config) { c.Rate.RequestsPerMinute = 0 }, wantErr: "requestsPerMinute"},
+		{name: "zero fixed rate", mutate: func(c *Config) { c.Rate.Schedule.RequestsPerMinute = 0 }, wantErr: "requestsPerMinute"},
+		{name: "unknown schedule", mutate: func(c *Config) { c.Rate.Schedule.Type = "burst" }, wantErr: "schedule.type"},
+		{name: "fixed with uniform fields", mutate: func(c *Config) { c.Rate.Schedule.MinRequestsPerMinute = 2 }, wantErr: "must not set uniform"},
+		{name: "uniform with fixed field", mutate: func(c *Config) {
+			c.Rate.Schedule = RateScheduleConfig{Type: "uniform", RequestsPerMinute: 30, MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1}
+		}, wantErr: "must not set requestsPerMinute"},
+		{name: "uniform invalid range", mutate: func(c *Config) {
+			c.Rate.Schedule = RateScheduleConfig{Type: "uniform", MinRequestsPerMinute: 56, MaxRequestsPerMinute: 2, WindowMinutes: 1}
+		}, wantErr: "maxRequestsPerMinute"},
+		{name: "uniform zero window", mutate: func(c *Config) {
+			c.Rate.Schedule = RateScheduleConfig{Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56}
+		}, wantErr: "windowMinutes"},
 		{name: "unknown limiter", mutate: func(c *Config) {
 			c.Rate.Limiter = &RateLimiterConfig{Type: "postgres"}
 		}, wantErr: "rate.limiter.type"},
+		{name: "unknown profile", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst"}
+		}, wantErr: "rate.profile.type"},
 		{name: "duplicate store", mutate: func(c *Config) { c.Stores = append(c.Stores, c.Stores[0]) }, wantErr: "duplicated"},
 		{name: "oversized body", mutate: func(c *Config) { c.Operations[0].Request.BodyTemplate = strings.Repeat("x", MaxRequestBodyBytes+1) }, wantErr: "exceeds"},
 		{name: "GET body", mutate: func(c *Config) { c.Operations[1].Request.BodyTemplate = "{}" }, wantErr: "GET request"},
@@ -57,6 +82,7 @@ func TestDecodeConfig(t *testing.T) {
 	t.Parallel()
 	want := validConfig()
 	want.Rate.Limiter = &RateLimiterConfig{Type: "redis"}
+	want.Rate.Profile = &RateProfileConfig{Type: "uniform"}
 	data, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
@@ -65,11 +91,14 @@ func TestDecodeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeConfig() error: %v", err)
 	}
-	if config.Rate.RequestsPerMinute != 30 {
-		t.Fatalf("requestsPerMinute = %d", config.Rate.RequestsPerMinute)
+	if config.Rate.Schedule.Type != "fixed" || config.Rate.Schedule.RequestsPerMinute != 30 {
+		t.Fatalf("rate schedule = %#v", config.Rate.Schedule)
 	}
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
 		t.Fatalf("rate limiter = %#v, want redis", config.Rate.Limiter)
+	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "uniform" {
+		t.Fatalf("rate profile = %#v, want uniform", config.Rate.Profile)
 	}
 }
 
@@ -80,7 +109,7 @@ func TestDecodeConfigRejectsInvalidDocuments(t *testing.T) {
 		input   string
 		wantErr string
 	}{
-		{name: "unknown field", input: `{"target":{"baseURL":"http://shorturl:8585"},"rate":{"requestsPerMinute":30},"operations":[],"typo":true}`, wantErr: "unknown field"},
+		{name: "unknown field", input: `{"target":{"baseURL":"http://shorturl:8585"},"rate":{"schedule":{"type":"fixed","requestsPerMinute":30}},"operations":[],"typo":true}`, wantErr: "unknown field"},
 		{name: "trailing document", input: `{}` + "\n" + `{}`, wantErr: "multiple JSON documents"},
 		{name: "oversized config", input: strings.Repeat(" ", MaxConfigBytes+1), wantErr: "config exceeds"},
 	}
@@ -98,7 +127,9 @@ func TestDecodeConfigRejectsInvalidDocuments(t *testing.T) {
 func validConfig() Config {
 	return Config{
 		Target: TargetConfig{BaseURL: "http://shorturl:8585"},
-		Rate:   RateConfig{RequestsPerMinute: 30},
+		Rate: RateConfig{Schedule: RateScheduleConfig{
+			Type: "fixed", RequestsPerMinute: 30,
+		}},
 		Stores: []StoreConfig{{Name: "hashes", Capacity: 10_000}},
 		Operations: []OperationConfig{
 			{

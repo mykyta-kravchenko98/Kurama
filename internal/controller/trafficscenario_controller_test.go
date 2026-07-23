@@ -41,11 +41,14 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode scenario config: %v", err)
 	}
-	if config.Rate.RequestsPerMinute != 30 || len(config.Stores) != 1 || len(config.Operations) != 3 {
+	if config.Rate.Schedule.Type != "fixed" || config.Rate.Schedule.RequestsPerMinute != 30 || len(config.Stores) != 1 || len(config.Operations) != 3 {
 		t.Fatalf("scenario config = %#v", config)
 	}
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "local" {
 		t.Fatalf("scenario limiter config = %#v; want local", config.Rate.Limiter)
+	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "fixed" {
+		t.Fatalf("scenario profile config = %#v; want fixed", config.Rate.Profile)
 	}
 
 	var deployment appsv1.Deployment
@@ -98,6 +101,10 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	}
 	scenario.Spec.Replicas = 2
 	scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeRedis}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: trafficv1alpha1.RateProfileTypeUniform}
+	scenario.Spec.Rate.Schedule = trafficv1alpha1.RateScheduleSpec{
+		Type: trafficv1alpha1.RateScheduleTypeUniform, MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
 	reconciler := &TrafficScenarioReconciler{
 		Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RedisAddress: "kurama-redis:6379",
@@ -133,6 +140,13 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	}
 	if config.Rate.Limiter == nil || config.Rate.Limiter.Type != "redis" {
 		t.Fatalf("scenario limiter config = %#v; want redis", config.Rate.Limiter)
+	}
+	if config.Rate.Profile == nil || config.Rate.Profile.Type != "uniform" {
+		t.Fatalf("scenario profile config = %#v; want uniform", config.Rate.Profile)
+	}
+	if config.Rate.Schedule.Type != "uniform" || config.Rate.Schedule.MinRequestsPerMinute != 2 ||
+		config.Rate.Schedule.MaxRequestsPerMinute != 56 || config.Rate.Schedule.WindowMinutes != 1 {
+		t.Fatalf("scenario schedule config = %#v", config.Rate.Schedule)
 	}
 }
 
@@ -226,6 +240,32 @@ func TestReconcileRejectsRedisLimiterWithoutControllerAddress(t *testing.T) {
 	}
 }
 
+func TestReconcileRejectsUniformScheduleWithoutControllerAddress(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Rate.Schedule = trafficv1alpha1.RateScheduleSpec{
+		Type: trafficv1alpha1.RateScheduleTypeUniform, MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
+	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err == nil {
+		t.Fatal("reconcile error = nil")
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "shorturl", Name: "shorturl"}, &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseFailed || !strings.Contains(actual.Status.Message, runner.RedisAddressEnv) {
+		t.Fatalf("scenario status = %#v", actual.Status)
+	}
+}
+
 func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -291,6 +331,24 @@ func TestValidateScenarioRejectsUnknownLimiterAndLocalMultiReplica(t *testing.T)
 	}
 }
 
+func TestValidateScenarioRejectsUnknownRateProfile(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: "burst"}
+	if err := validateScenario(scenario); err == nil {
+		t.Fatal("validateScenario() error = nil")
+	}
+}
+
+func TestValidateScenarioRejectsUnknownRateSchedule(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Rate.Schedule.Type = "burst"
+	if err := validateScenario(scenario); err == nil {
+		t.Fatal("validateScenario() error = nil")
+	}
+}
+
 func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
 	t.Parallel()
 	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
@@ -305,7 +363,9 @@ func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
 func validScenarioSpec() trafficv1alpha1.TrafficScenarioSpec {
 	return trafficv1alpha1.TrafficScenarioSpec{
 		Target: trafficv1alpha1.TargetSpec{BaseURL: "http://shorturl.shorturl.svc.cluster.local"},
-		Rate:   trafficv1alpha1.RateSpec{RequestsPerMinute: 30},
+		Rate: trafficv1alpha1.RateSpec{Schedule: trafficv1alpha1.RateScheduleSpec{
+			Type: trafficv1alpha1.RateScheduleTypeFixed, RequestsPerMinute: 30,
+		}},
 		Stores: []trafficv1alpha1.StoreSpec{{Name: "hashes", Capacity: 10_000}},
 		Operations: []trafficv1alpha1.OperationSpec{
 			{
