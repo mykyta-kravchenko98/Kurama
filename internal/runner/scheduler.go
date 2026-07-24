@@ -2,10 +2,7 @@ package runner
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"math/rand/v2"
 	"slices"
 	"time"
 
@@ -37,40 +34,6 @@ type Scheduler struct {
 	schedule   rateschedule.Schedule
 }
 
-type SchedulerOption func(*Scheduler)
-
-func WithWeightedRandomSource(source WeightedRandomSource) SchedulerOption {
-	return func(scheduler *Scheduler) {
-		if source != nil {
-			scheduler.random = source
-		}
-	}
-}
-
-func WithExecutionHandler(handler ExecutionHandler) SchedulerOption {
-	return func(scheduler *Scheduler) {
-		if handler != nil {
-			scheduler.handle = handler
-		}
-	}
-}
-
-func WithRateLimiter(limiter ratelimit.Limiter) SchedulerOption {
-	return func(scheduler *Scheduler) {
-		if limiter != nil {
-			scheduler.limiter = limiter
-		}
-	}
-}
-
-func WithRateSchedule(schedule rateschedule.Schedule) SchedulerOption {
-	return func(scheduler *Scheduler) {
-		if schedule != nil {
-			scheduler.schedule = schedule
-		}
-	}
-}
-
 func NewScheduler(
 	rate RateConfig,
 	operations []OperationConfig,
@@ -78,6 +41,9 @@ func NewScheduler(
 	options ...SchedulerOption,
 ) (*Scheduler, error) {
 	if err := validateRateSchedule(rate.Schedule); err != nil {
+		return nil, err
+	}
+	if err := validateRateProfile(rate.Profile); err != nil {
 		return nil, err
 	}
 	if len(operations) == 0 || len(operations) > MaxOperations {
@@ -91,11 +57,16 @@ func NewScheduler(
 	if executor == nil {
 		return nil, fmt.Errorf("operation executor must not be nil")
 	}
-	profileType := ""
+	profileConfig := trafficprofile.Config{}
 	if rate.Profile != nil {
-		profileType = rate.Profile.Type
+		profileConfig = trafficprofile.Config{
+			Type:         rate.Profile.Type,
+			MinBurstSize: rate.Profile.MinBurstSize,
+			MaxBurstSize: rate.Profile.MaxBurstSize,
+			DelayDivisor: rate.Profile.DelayDivisor,
+		}
 	}
-	delayProfile, err := trafficprofile.New(profileType)
+	delayProfile, err := trafficprofile.New(profileConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create traffic profile: %w", err)
 	}
@@ -123,9 +94,10 @@ func NewScheduler(
 	return scheduler, nil
 }
 
-// Run executes one operation immediately and then waits for the active traffic
-// profile before each subsequent slot. Calls are deliberately sequential: slow
-// targets reduce achieved RPM instead of creating an unbounded request queue.
+// Run atomically reserves the next profile batch and executes its operations
+// sequentially. Slow targets reduce achieved RPM instead of creating an
+// unbounded request queue. A runner crash may leave reserved permits unused
+// until the current limiter window expires.
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
@@ -138,132 +110,36 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 			continue
 		}
-		s.executeSlotAtRate(ctx, requestsPerMinute)
-		if !s.wait(ctx, s.profile.NextDelay(requestsPerMinute)) {
-			return
-		}
-	}
-}
-
-func (s *Scheduler) executeSlot(ctx context.Context) {
-	requestsPerMinute, ok := s.currentRequestsPerMinute(ctx)
-	if !ok {
-		return
-	}
-	s.executeSlotAtRate(ctx, requestsPerMinute)
-}
-
-func (s *Scheduler) executeSlotAtRate(ctx context.Context, requestsPerMinute int) {
-	decision, err := s.limiter.TryAcquire(ctx, ratelimit.Limit{
-		Requests: requestsPerMinute,
-		Window:   time.Minute,
-	})
-	if err != nil {
-		slog.Error("Kurama rate limiter failed", "error", err)
-		return
-	}
-	if !decision.Allowed {
-		slog.Debug("Kurama request slot rejected by rate limiter", "retryAfter", decision.RetryAfter)
-		return
-	}
-
-	excluded := make([]bool, len(s.operations))
-	for attempts := 0; attempts < len(s.operations); attempts++ {
-		index, ok := pickWeighted(s.operations, excluded, s.random)
+		decision, ok := s.reserveBatch(ctx, requestsPerMinute)
 		if !ok {
-			return
-		}
-		operation := s.operations[index]
-		result, err := s.executor.Execute(ctx, operation)
-		if result.Operation == "" {
-			result.Operation = operation.Name
-		}
-		s.handle(result, err)
-		if !errors.Is(err, ErrStoreValueUnavailable) {
-			return
-		}
-		excluded[index] = true
-	}
-}
-
-func (s *Scheduler) currentRequestsPerMinute(ctx context.Context) (int, bool) {
-	requestsPerMinute, err := s.schedule.RequestsPerMinute(ctx)
-	if err != nil {
-		if ctx.Err() == nil {
-			slog.Error("Kurama rate schedule failed", "error", err)
-		}
-		return 0, false
-	}
-	if requestsPerMinute < 1 || requestsPerMinute > MaxRequestsPerMinute {
-		slog.Error("Kurama rate schedule returned invalid RPM", "requestsPerMinute", requestsPerMinute)
-		return 0, false
-	}
-	return requestsPerMinute, true
-}
-
-func pickWeighted(
-	operations []OperationConfig,
-	excluded []bool,
-	random WeightedRandomSource,
-) (int, bool) {
-	totalWeight := 0
-	for i, operation := range operations {
-		if !excluded[i] {
-			totalWeight += operation.Weight
-		}
-	}
-	if totalWeight == 0 {
-		return 0, false
-	}
-
-	selected := random.IntN(totalWeight)
-	for i, operation := range operations {
-		if excluded[i] {
+			if !s.wait(ctx, time.Second) {
+				return
+			}
 			continue
 		}
-		if selected < operation.Weight {
-			return i, true
+		if decision.Granted == 0 {
+			delay := decision.RetryAfter
+			if delay <= 0 {
+				delay = time.Second
+			}
+			if !s.wait(ctx, delay) {
+				return
+			}
+			continue
 		}
-		selected -= operation.Weight
-	}
-	return 0, false
-}
-
-func logExecution(result ExecutionResult, err error) {
-	attributes := []any{
-		"operation", result.Operation,
-		"status", result.StatusCode,
-		"duration", result.Duration,
-		"responseBytes", result.ResponseBytes,
-		"captured", result.Captured,
-	}
-	if err == nil {
-		slog.Info("Kurama request completed", attributes...)
-		return
-	}
-	attributes = append(attributes, "error", err)
-	if errors.Is(err, ErrStoreValueUnavailable) {
-		slog.Warn("Kurama operation temporarily unavailable", attributes...)
-		return
-	}
-	slog.Error("Kurama request failed", attributes...)
-}
-
-type globalRandomSource struct{}
-
-func (globalRandomSource) IntN(n int) int {
-	return rand.IntN(n)
-}
-
-type waitForDelay func(ctx context.Context, delay time.Duration) bool
-
-func waitWithTimer(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
+		for position := 1; position <= decision.Granted; position++ {
+			s.executeReservedSlot(ctx)
+			delay := s.profile.NextDelay(trafficprofile.DelayContext{
+				RequestsPerMinute: requestsPerMinute,
+				Position:          position,
+				BatchSize:         decision.Granted,
+			})
+			if position == decision.Granted && decision.RetryAfter > delay {
+				delay = decision.RetryAfter
+			}
+			if !s.wait(ctx, delay) {
+				return
+			}
+		}
 	}
 }

@@ -84,7 +84,8 @@ turning it into an in-house replacement for a complete load-testing platform.
   be queried in Grafana.
 - Export Kurama metrics for attempts, completed requests, response status,
   latency, scheduler slots, configured versus achieved rate, pool size,
-  misses and evictions.
+  misses and evictions. Rate limiter metrics distinguish acquisition results
+  from the number of requested and granted permits.
 - Propagate a scenario identifier in request headers and runner logs for
   correlation in Loki, Tempo and Prometheus.
 - Grafana dashboards and the surrounding Loki, Tempo and Prometheus
@@ -123,22 +124,32 @@ turning it into an in-house replacement for a complete load-testing platform.
   liveness and readiness probes for runner Deployments.
 - Kept existing runner replicas available during updates with an explicit
   zero-unavailable rolling strategy and bounded rollout history/deadline.
-- Add normal and burst traffic profiles.
-- Make random generation reproducible with an optional scenario seed.
-- Add per-operation rate caps, including protection for APIs with rate limits.
+- Kept uniform-random timing as the normal background traffic profile and
+  added an explicit burst profile that preserves the selected mean RPM.
+- Reserved burst permits atomically with partial grants, so concurrent runner
+  replicas cannot exceed the shared window budget or fragment a granted group.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
 
-### Phase 5 — reusable and hardened HTTP scenarios
+### Phase 5 — future backlog for reusable and hardened HTTP scenarios
 
 - Add `none`, bearer-token, API-key and basic authentication, always through
   Kubernetes `Secret` references.
 - Add OAuth2 client-credentials only when a real target requires it.
 - Add restricted header templates where real scenarios require them.
+- Make random generation reproducible with an optional scenario seed.
+- Add per-operation rate caps, including protection for APIs with rate limits.
+- Move cross-field `TrafficScenario` invariants, such as schedule/profile field
+  compatibility and burst ranges, into CRD CEL admission rules so Kubernetes
+  rejects invalid resources before reconciliation. Retain Go validation as a
+  defense-in-depth layer for standalone runner configuration.
+- Define stable structured log event codes for scheduler, executor, store and
+  limiter events so Loki queries and future model-training data do not depend
+  on human-readable log messages. Keep those messages local to their call sites
+  instead of promoting one-off text to constants.
 - Keep the CRD protocol-neutral enough to add a separate executor later; do
   not claim gRPC, Kafka or WebSocket support before implementing it.
-- Add target allow-lists, NetworkPolicy examples, resource limits and
-  admission validation.
+- Add target allow-lists, NetworkPolicy examples and resource limits.
 - Do not read a target application's database directly.
 
 ## Non-goals for the first release
@@ -183,6 +194,38 @@ rate:
 Uniform schedules require the controller Redis address. `profile` controls
 when attempts occur within the selected rate, while `limiter` enforces the
 shared request budget.
+
+A burst profile chooses an inclusive group size for every burst. Requests
+inside the group use short delays followed by a compensating pause, so the
+long-term mean remains the RPM selected by the schedule. The effective group
+size is capped at the current RPM so a low-rate burst cycle never spans more
+than one minute:
+
+```yaml
+rate:
+  schedule:
+    type: uniform
+    minRequestsPerMinute: 2
+    maxRequestsPerMinute: 128
+    windowMinutes: 1
+  limiter:
+    type: redis
+  profile:
+    type: burst
+    minBurstSize: 5
+    maxBurstSize: 15
+    delayDivisor: 10
+```
+
+Each runner chooses its burst sizes independently. The distributed Redis
+limiter atomically reserves the requested group and remains the authority for
+the shared request budget across replicas. If only part of the window budget
+is available, the granted group is reduced rather than discarded. A runner
+failure after reservation can leave unused permits until that limiter window
+expires, but it cannot exceed the configured rate.
+`delayDivisor` makes the interval inside a burst that many times shorter than
+the mean request interval. The default is `10`; a compensating pause after the
+burst preserves the selected average RPM.
 
 ## Development
 

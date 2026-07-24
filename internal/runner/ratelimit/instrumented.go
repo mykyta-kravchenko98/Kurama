@@ -8,6 +8,7 @@ import (
 
 const (
 	ResultAllowed  = "allowed"
+	ResultPartial  = "partial"
 	ResultRejected = "rejected"
 	ResultError    = "error"
 )
@@ -15,9 +16,11 @@ const (
 // Observation describes one limiter acquisition without exposing scenario
 // values as metric labels.
 type Observation struct {
-	Backend  string
-	Result   string
-	Duration time.Duration
+	Backend          string
+	Result           string
+	Duration         time.Duration
+	RequestedPermits int
+	GrantedPermits   int
 }
 
 type Observer interface {
@@ -53,19 +56,23 @@ func NewInstrumentedLimiter(limiter Limiter, backend string, observer Observer) 
 	}, nil
 }
 
-func (l *InstrumentedLimiter) TryAcquire(ctx context.Context, limit Limit) (Decision, error) {
+func (l *InstrumentedLimiter) TryAcquire(ctx context.Context, limit Limit, permits int) (Decision, error) {
 	started := l.now()
-	decision, err := l.limiter.TryAcquire(ctx, limit)
+	decision, err := l.limiter.TryAcquire(ctx, limit, permits)
 	result := ResultRejected
 	if err != nil {
 		result = ResultError
-	} else if decision.Allowed {
+	} else if decision.Granted == permits {
 		result = ResultAllowed
+	} else if decision.Granted > 0 {
+		result = ResultPartial
 	}
 	l.observer.ObserveRateLimit(ctx, Observation{
-		Backend:  l.backend,
-		Result:   result,
-		Duration: l.now().Sub(started),
+		Backend:          l.backend,
+		Result:           result,
+		Duration:         l.now().Sub(started),
+		RequestedPermits: permits,
+		GrantedPermits:   decision.Granted,
 	})
 	return decision, err
 }

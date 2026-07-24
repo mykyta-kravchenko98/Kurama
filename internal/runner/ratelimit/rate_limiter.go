@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// Limit describes a shared request budget. A successful acquisition
-// consumes one of Requests permits in the current Window.
+// Limit describes a shared request budget.
 type Limit struct {
 	Requests int
 	Window   time.Duration
@@ -23,15 +22,24 @@ func (l Limit) Validate() error {
 	return nil
 }
 
-// Decision reports whether one request permit was acquired. A rejected
-// acquisition may include the recommended delay before another attempt.
+func validatePermits(limit Limit, permits int) error {
+	if permits < 1 {
+		return fmt.Errorf("permits must be greater than zero")
+	}
+	if permits > limit.Requests {
+		return fmt.Errorf("permits must not exceed the request budget")
+	}
+	return nil
+}
+
+// Decision reports how many request permits were atomically reserved. A
+// partial or rejected acquisition includes the delay until the next window.
 type Decision struct {
-	Allowed    bool
+	Granted    int
 	RetryAfter time.Duration
 }
 
-// Limiter atomically consumes request permits without waiting for one to
-// become available.
+// Limiter atomically reserves up to permits request slots without waiting.
 type Limiter interface {
-	TryAcquire(ctx context.Context, limit Limit) (Decision, error)
+	TryAcquire(ctx context.Context, limit Limit, permits int) (Decision, error)
 }
