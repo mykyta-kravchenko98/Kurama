@@ -379,7 +379,40 @@ func TestValidateScenarioRejectsUnknownLimiterAndLocalMultiReplica(t *testing.T)
 func TestValidateScenarioRejectsUnknownRateProfile(t *testing.T) {
 	t.Parallel()
 	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
-	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: "burst"}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{Type: "normal"}
+	if err := validateScenario(scenario); err == nil {
+		t.Fatal("validateScenario() error = nil")
+	}
+}
+
+func TestScenarioRunnerConfigCopiesBurstProfile(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{
+		Type:         trafficv1alpha1.RateProfileTypeBurst,
+		MinBurstSize: 5,
+		MaxBurstSize: 15,
+		DelayDivisor: 10,
+	}
+
+	if err := validateScenario(scenario); err != nil {
+		t.Fatalf("validateScenario() error = %v", err)
+	}
+	profile := scenarioRunnerConfig(scenario).Rate.Profile
+	if profile == nil || profile.Type != "burst" ||
+		profile.MinBurstSize != 5 || profile.MaxBurstSize != 15 || profile.DelayDivisor != 10 {
+		t.Fatalf("runner burst profile = %#v", profile)
+	}
+}
+
+func TestValidateScenarioRejectsInvalidBurstProfile(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Rate.Profile = &trafficv1alpha1.RateProfileSpec{
+		Type:         trafficv1alpha1.RateProfileTypeBurst,
+		MinBurstSize: 15,
+		MaxBurstSize: 5,
+	}
 	if err := validateScenario(scenario); err == nil {
 		t.Fatal("validateScenario() error = nil")
 	}

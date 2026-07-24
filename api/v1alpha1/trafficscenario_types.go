@@ -67,12 +67,32 @@ type RateProfileType string
 const (
 	RateProfileTypeFixed   RateProfileType = "fixed"
 	RateProfileTypeUniform RateProfileType = "uniform"
+	RateProfileTypeBurst   RateProfileType = "burst"
 )
 
 type RateProfileSpec struct {
-	// +kubebuilder:validation:Enum=fixed;uniform
+	// +kubebuilder:validation:Enum=fixed;uniform;burst
 	// +optional
 	Type RateProfileType `json:"type,omitempty"`
+	// MinBurstSize is required for the burst profile and includes the first
+	// request in each burst.
+	// +kubebuilder:validation:Minimum=2
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MinBurstSize int `json:"minBurstSize,omitempty"`
+	// MaxBurstSize is required for the burst profile and is inclusive.
+	// +kubebuilder:validation:Minimum=2
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MaxBurstSize int `json:"maxBurstSize,omitempty"`
+	// DelayDivisor controls how much faster requests inside a burst are sent
+	// compared with the mean interval. The post-burst pause compensates for
+	// this acceleration so the configured average rate is preserved. When
+	// omitted from a burst profile, the runner uses 10.
+	// +kubebuilder:validation:Minimum=2
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	DelayDivisor int `json:"delayDivisor,omitempty"`
 }
 
 type StoreSpec struct {

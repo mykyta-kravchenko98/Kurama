@@ -67,12 +67,15 @@ func validateRedisScope(namespace, scenario string) error {
 	return nil
 }
 
-func (l *RedisRateLimiter) TryAcquire(ctx context.Context, limit Limit) (Decision, error) {
+func (l *RedisRateLimiter) TryAcquire(ctx context.Context, limit Limit, permits int) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
 	if err := limit.Validate(); err != nil {
 		return Decision{}, fmt.Errorf("validate rate limit: %w", err)
+	}
+	if err := validatePermits(limit, permits); err != nil {
+		return Decision{}, fmt.Errorf("validate rate limit permits: %w", err)
 	}
 	windowMicros := limit.Window.Microseconds()
 	if windowMicros < 1 {
@@ -85,6 +88,7 @@ func (l *RedisRateLimiter) TryAcquire(ctx context.Context, limit Limit) (Decisio
 		[]string{l.key},
 		limit.Requests,
 		windowMicros,
+		permits,
 	).Int64Slice()
 	if err != nil {
 		return Decision{}, fmt.Errorf("acquire Redis rate limit: %w", err)
@@ -94,7 +98,7 @@ func (l *RedisRateLimiter) TryAcquire(ctx context.Context, limit Limit) (Decisio
 	}
 
 	return Decision{
-		Allowed:    result[0] == 1,
+		Granted:    int(result[0]),
 		RetryAfter: time.Duration(result[1]) * time.Microsecond,
 	}, nil
 }

@@ -65,7 +65,7 @@ func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
 		limiterErr     error
 		wantExecutions int
 	}{
-		{name: "allowed", decision: ratelimit.Decision{Allowed: true}, wantExecutions: 1},
+		{name: "allowed", decision: ratelimit.Decision{Granted: 1}, wantExecutions: 1},
 		{name: "rejected"},
 		{name: "limiter error", limiterErr: errors.New("redis unavailable")},
 	}
@@ -84,6 +84,9 @@ func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
 			if limiter.calls != 1 {
 				t.Fatalf("limiter calls = %d; want 1", limiter.calls)
 			}
+			if limiter.permits != 1 {
+				t.Fatalf("requested permits = %d; want 1", limiter.permits)
+			}
 			wantLimit := ratelimit.Limit{Requests: 30, Window: time.Minute}
 			if limiter.limit != wantLimit {
 				t.Fatalf("limit = %#v; want %#v", limiter.limit, wantLimit)
@@ -94,7 +97,7 @@ func TestSchedulerExecutesOnlyWithRateLimitPermit(t *testing.T) {
 
 func TestSchedulerPassesCurrentScheduleRateToLimiter(t *testing.T) {
 	t.Parallel()
-	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Granted: 1}}
 	scheduler := newTestScheduler(t, &recordingExecutor{},
 		WithRateLimiter(limiter),
 		WithRateSchedule(fixedTestSchedule{requestsPerMinute: 45}),
@@ -110,7 +113,7 @@ func TestSchedulerPassesCurrentScheduleRateToLimiter(t *testing.T) {
 func TestSchedulerFailsClosedWhenRateScheduleFails(t *testing.T) {
 	t.Parallel()
 	executor := &recordingExecutor{}
-	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Allowed: true}}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{Granted: 1}}
 	scheduler := newTestScheduler(t, executor,
 		WithRateLimiter(limiter),
 		WithRateSchedule(fixedTestSchedule{err: errors.New("redis unavailable")}),
@@ -122,6 +125,82 @@ func TestSchedulerFailsClosedWhenRateScheduleFails(t *testing.T) {
 	}
 	if limiter.calls != 0 {
 		t.Fatalf("limiter calls = %d, want 0", limiter.calls)
+	}
+}
+
+func TestSchedulerReservesAndExecutesPartialBurstBatch(t *testing.T) {
+	t.Parallel()
+	executor := &recordingExecutor{}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{
+		Granted: 2, RetryAfter: time.Second,
+	}}
+	scheduler, err := NewScheduler(
+		RateConfig{
+			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
+			Profile: &RateProfileConfig{
+				Type: "burst", MinBurstSize: 3, MaxBurstSize: 3,
+			},
+		},
+		schedulerOperations(),
+		executor,
+		WithRateLimiter(limiter),
+		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
+		WithExecutionHandler(func(ExecutionResult, error) {}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scheduler.executeSlot(context.Background())
+	if limiter.permits != 3 {
+		t.Fatalf("requested permits = %d; want 3", limiter.permits)
+	}
+	if limiter.calls != 1 {
+		t.Fatalf("limiter calls = %d; want one atomic reservation", limiter.calls)
+	}
+	if got := len(executor.operationNames()); got != 2 {
+		t.Fatalf("executions = %d; want 2 granted permits", got)
+	}
+}
+
+func TestSchedulerWaitsForWindowAfterPartialBurst(t *testing.T) {
+	t.Parallel()
+	executor := &recordingExecutor{}
+	limiter := &recordingRateLimiter{decision: ratelimit.Decision{
+		Granted: 2, RetryAfter: 30 * time.Second,
+	}}
+	scheduler, err := NewScheduler(
+		RateConfig{
+			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
+			Profile: &RateProfileConfig{
+				Type: "burst", MinBurstSize: 3, MaxBurstSize: 3,
+			},
+		},
+		schedulerOperations(),
+		executor,
+		WithRateLimiter(limiter),
+		WithWeightedRandomSource(&sequenceRandomSource{values: []int{0, 0}}),
+		WithExecutionHandler(func(ExecutionResult, error) {}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delays []time.Duration
+	scheduler.wait = func(_ context.Context, delay time.Duration) bool {
+		delays = append(delays, delay)
+		return len(delays) < 2
+	}
+
+	scheduler.Run(context.Background())
+	wantDelays := []time.Duration{200 * time.Millisecond, 30 * time.Second}
+	if !reflect.DeepEqual(delays, wantDelays) {
+		t.Fatalf("delays = %v; want %v", delays, wantDelays)
+	}
+	if limiter.calls != 1 {
+		t.Fatalf("limiter calls = %d; want one partial reservation", limiter.calls)
+	}
+	if got := len(executor.operationNames()); got != 2 {
+		t.Fatalf("executions = %d; want 2 granted permits", got)
 	}
 }
 
@@ -227,7 +306,11 @@ func TestNewSchedulerValidatesInputs(t *testing.T) {
 		{name: "nil executor", rate: fixedRateConfig(30), operations: schedulerOperations()},
 		{name: "unknown profile", rate: RateConfig{
 			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
-			Profile:  &RateProfileConfig{Type: "burst"},
+			Profile:  &RateProfileConfig{Type: "normal"},
+		}, operations: schedulerOperations(), executor: executor},
+		{name: "invalid burst profile", rate: RateConfig{
+			Schedule: RateScheduleConfig{Type: "fixed", RequestsPerMinute: 30},
+			Profile:  &RateProfileConfig{Type: "burst", MinBurstSize: 5, MaxBurstSize: 4},
 		}, operations: schedulerOperations(), executor: executor},
 		{name: "uniform without external implementation", rate: RateConfig{Schedule: RateScheduleConfig{
 			Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
@@ -279,6 +362,7 @@ type recordingRateLimiter struct {
 	decision ratelimit.Decision
 	err      error
 	limit    ratelimit.Limit
+	permits  int
 	calls    int
 }
 
@@ -291,9 +375,14 @@ func (s fixedTestSchedule) RequestsPerMinute(context.Context) (int, error) {
 	return s.requestsPerMinute, s.err
 }
 
-func (l *recordingRateLimiter) TryAcquire(_ context.Context, limit ratelimit.Limit) (ratelimit.Decision, error) {
+func (l *recordingRateLimiter) TryAcquire(
+	_ context.Context,
+	limit ratelimit.Limit,
+	permits int,
+) (ratelimit.Decision, error) {
 	l.calls++
 	l.limit = limit
+	l.permits = permits
 	return l.decision, l.err
 }
 

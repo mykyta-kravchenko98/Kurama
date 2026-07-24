@@ -16,29 +16,29 @@ func TestLocalLimiterEnforcesBudgetAndResetsInNewWindow(t *testing.T) {
 	limit := Limit{Requests: 2, Window: time.Minute}
 
 	for i := 0; i < limit.Requests; i++ {
-		decision, err := limiter.TryAcquire(context.Background(), limit)
+		decision, err := limiter.TryAcquire(context.Background(), limit, 1)
 		if err != nil {
 			t.Fatalf("acquisition %d error = %v", i+1, err)
 		}
-		if !decision.Allowed || decision.RetryAfter != 0 {
+		if decision.Granted != 1 || decision.RetryAfter != 0 {
 			t.Fatalf("acquisition %d decision = %#v; want allowed", i+1, decision)
 		}
 	}
 
-	decision, err := limiter.TryAcquire(context.Background(), limit)
+	decision, err := limiter.TryAcquire(context.Background(), limit, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Allowed || decision.RetryAfter != 30*time.Second {
+	if decision.Granted != 0 || decision.RetryAfter != 30*time.Second {
 		t.Fatalf("rejected decision = %#v; want RetryAfter 30s", decision)
 	}
 
 	now = now.Add(time.Minute)
-	decision, err = limiter.TryAcquire(context.Background(), limit)
+	decision, err = limiter.TryAcquire(context.Background(), limit, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !decision.Allowed {
+	if decision.Granted != 1 {
 		t.Fatal("acquisition in a new window was rejected")
 	}
 }
@@ -56,14 +56,12 @@ func TestLocalLimiterDoesNotExceedBudgetConcurrently(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			decision, err := limiter.TryAcquire(context.Background(), limit)
+			decision, err := limiter.TryAcquire(context.Background(), limit, 1)
 			if err != nil {
 				errorsChannel <- err
 				return
 			}
-			if decision.Allowed {
-				allowed.Add(1)
-			}
+			allowed.Add(int32(decision.Granted))
 		}()
 	}
 	wait.Wait()
@@ -79,13 +77,36 @@ func TestLocalLimiterDoesNotExceedBudgetConcurrently(t *testing.T) {
 func TestLocalLimiterReportsValidationAndCancellationErrors(t *testing.T) {
 	t.Parallel()
 	limiter := NewLocalLimiter()
-	if _, err := limiter.TryAcquire(context.Background(), Limit{}); err == nil {
+	if _, err := limiter.TryAcquire(context.Background(), Limit{}, 1); err == nil {
 		t.Fatal("invalid limit error = nil")
 	}
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := limiter.TryAcquire(cancelled, Limit{Requests: 1, Window: time.Minute}); !errors.Is(err, context.Canceled) {
+	if _, err := limiter.TryAcquire(cancelled, Limit{Requests: 1, Window: time.Minute}, 1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled acquisition error = %v; want context.Canceled", err)
+	}
+}
+
+func TestLocalLimiterPartiallyGrantsBatch(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 21, 12, 0, 30, 0, time.UTC)
+	limiter := newLocalLimiter(func() time.Time { return now })
+	limit := Limit{Requests: 5, Window: time.Minute}
+
+	first, err := limiter.TryAcquire(context.Background(), limit, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Granted != 3 || first.RetryAfter != 0 {
+		t.Fatalf("first decision = %#v; want full grant", first)
+	}
+
+	second, err := limiter.TryAcquire(context.Background(), limit, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Granted != 2 || second.RetryAfter != 30*time.Second {
+		t.Fatalf("second decision = %#v; want partial grant with 30s retry", second)
 	}
 }

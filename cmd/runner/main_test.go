@@ -227,6 +227,7 @@ func TestNormalizedRateProfileType(t *testing.T) {
 		{name: "omitted", want: "fixed"},
 		{name: "empty", config: &runner.RateProfileConfig{}, want: "fixed"},
 		{name: "uniform", config: &runner.RateProfileConfig{Type: "uniform"}, want: "uniform"},
+		{name: "burst", config: &runner.RateProfileConfig{Type: "burst"}, want: "burst"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -271,11 +272,15 @@ func fixedScheduleConfig(requestsPerMinute int) runner.RateScheduleConfig {
 
 func assertLimiterAllowsOneRequest(t *testing.T, limiter ratelimit.Limiter) {
 	t.Helper()
-	decision, err := limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute})
+	decision, err := limiter.TryAcquire(
+		context.Background(),
+		ratelimit.Limit{Requests: 1, Window: time.Minute},
+		1,
+	)
 	if err != nil {
 		t.Fatalf("TryAcquire() error = %v", err)
 	}
-	if !decision.Allowed {
+	if decision.Granted != 1 {
 		t.Fatal("first rate limit acquisition was rejected")
 	}
 }
@@ -299,7 +304,11 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	if err := state.Put(context.Background(), "hashes", "value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	if _, err := state.Limiter.TryAcquire(context.Background(), ratelimit.Limit{Requests: 1, Window: time.Minute}); err != nil {
+	if _, err := state.Limiter.TryAcquire(
+		context.Background(),
+		ratelimit.Limit{Requests: 1, Window: time.Minute},
+		1,
+	); err != nil {
 		t.Fatalf("TryAcquire() error = %v", err)
 	}
 	if _, err := state.Schedule.RequestsPerMinute(context.Background()); err != nil {
@@ -333,6 +342,12 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `kurama_rate_limiter_acquisitions_total{backend="local",result="allowed"} 1`) {
 		t.Fatalf("/metrics response does not contain rate limiter counter:\n%s", body)
+	}
+	if !strings.Contains(string(body), `kurama_rate_limiter_permits_requested_total{backend="local"} 1`) {
+		t.Fatalf("/metrics response does not contain requested permits counter:\n%s", body)
+	}
+	if !strings.Contains(string(body), `kurama_rate_limiter_permits_granted_total{backend="local"} 1`) {
+		t.Fatalf("/metrics response does not contain granted permits counter:\n%s", body)
 	}
 	if !strings.Contains(string(body), `kurama_rate_schedule_requests_per_minute{type="fixed"} 76`) {
 		t.Fatalf("/metrics response does not contain current rate schedule RPM:\n%s", body)

@@ -8,8 +8,10 @@ import (
 )
 
 type PrometheusObserver struct {
-	acquisitions *prometheus.CounterVec
-	duration     *prometheus.HistogramVec
+	acquisitions     *prometheus.CounterVec
+	duration         *prometheus.HistogramVec
+	permitsRequested *prometheus.CounterVec
+	permitsGranted   *prometheus.CounterVec
 }
 
 var _ Observer = (*PrometheusObserver)(nil)
@@ -32,6 +34,18 @@ func NewPrometheusObserver(registerer prometheus.Registerer) (*PrometheusObserve
 		Help:      "Duration of Kurama rate limiter acquisitions in seconds.",
 		Buckets:   prometheus.ExponentialBuckets(0.0001, 2, 15),
 	}, []string{"backend", "result"})
+	permitsRequested := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kurama",
+		Subsystem: "rate_limiter",
+		Name:      "permits_requested_total",
+		Help:      "Total number of request permits requested from the Kurama rate limiter.",
+	}, []string{"backend"})
+	permitsGranted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "kurama",
+		Subsystem: "rate_limiter",
+		Name:      "permits_granted_total",
+		Help:      "Total number of request permits granted by the Kurama rate limiter.",
+	}, []string{"backend"})
 
 	if err := registerer.Register(acquisitions); err != nil {
 		return nil, fmt.Errorf("register rate limiter acquisitions metric: %w", err)
@@ -40,11 +54,29 @@ func NewPrometheusObserver(registerer prometheus.Registerer) (*PrometheusObserve
 		registerer.Unregister(acquisitions)
 		return nil, fmt.Errorf("register rate limiter acquisition duration metric: %w", err)
 	}
-	return &PrometheusObserver{acquisitions: acquisitions, duration: duration}, nil
+	if err := registerer.Register(permitsRequested); err != nil {
+		registerer.Unregister(acquisitions)
+		registerer.Unregister(duration)
+		return nil, fmt.Errorf("register rate limiter requested permits metric: %w", err)
+	}
+	if err := registerer.Register(permitsGranted); err != nil {
+		registerer.Unregister(acquisitions)
+		registerer.Unregister(duration)
+		registerer.Unregister(permitsRequested)
+		return nil, fmt.Errorf("register rate limiter granted permits metric: %w", err)
+	}
+	return &PrometheusObserver{
+		acquisitions:     acquisitions,
+		duration:         duration,
+		permitsRequested: permitsRequested,
+		permitsGranted:   permitsGranted,
+	}, nil
 }
 
 func (o *PrometheusObserver) ObserveRateLimit(_ context.Context, observation Observation) {
 	labels := []string{observation.Backend, observation.Result}
 	o.acquisitions.WithLabelValues(labels...).Inc()
 	o.duration.WithLabelValues(labels...).Observe(observation.Duration.Seconds())
+	o.permitsRequested.WithLabelValues(observation.Backend).Add(float64(observation.RequestedPermits))
+	o.permitsGranted.WithLabelValues(observation.Backend).Add(float64(observation.GrantedPermits))
 }

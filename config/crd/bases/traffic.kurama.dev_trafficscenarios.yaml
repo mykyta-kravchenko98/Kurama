@@ -147,11 +147,24 @@ spec:
                     profile:
                       type: object
                       properties:
+                        delayDivisor:
+                          type: integer
+                          maximum: 100
+                          minimum: 2
+                        maxBurstSize:
+                          type: integer
+                          maximum: 100
+                          minimum: 2
+                        minBurstSize:
+                          type: integer
+                          maximum: 100
+                          minimum: 2
                         type:
                           type: string
                           enum:
                             - fixed
                             - uniform
+                            - burst
                     schedule:
                       type: object
                       required:

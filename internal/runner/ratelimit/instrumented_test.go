@@ -12,13 +12,15 @@ func TestInstrumentedLimiterObservesResultsAndPreservesResponse(t *testing.T) {
 	limiterErr := errors.New("redis unavailable")
 	tests := []struct {
 		name       string
+		permits    int
 		decision   Decision
 		err        error
 		wantResult string
 	}{
-		{name: "allowed", decision: Decision{Allowed: true}, wantResult: ResultAllowed},
-		{name: "rejected", decision: Decision{RetryAfter: time.Second}, wantResult: ResultRejected},
-		{name: "error", err: limiterErr, wantResult: ResultError},
+		{name: "allowed", permits: 3, decision: Decision{Granted: 3}, wantResult: ResultAllowed},
+		{name: "partial", permits: 3, decision: Decision{Granted: 2, RetryAfter: time.Second}, wantResult: ResultPartial},
+		{name: "rejected", permits: 3, decision: Decision{RetryAfter: time.Second}, wantResult: ResultRejected},
+		{name: "error", permits: 3, err: limiterErr, wantResult: ResultError},
 	}
 
 	for _, test := range tests {
@@ -37,14 +39,24 @@ func TestInstrumentedLimiterObservesResultsAndPreservesResponse(t *testing.T) {
 				return current
 			}
 
-			decision, acquireErr := limiter.TryAcquire(context.Background(), Limit{Requests: 1, Window: time.Minute})
+			decision, acquireErr := limiter.TryAcquire(
+				context.Background(),
+				Limit{Requests: 3, Window: time.Minute},
+				test.permits,
+			)
 			if decision != test.decision || !errors.Is(acquireErr, test.err) {
 				t.Fatalf("TryAcquire() = (%#v, %v); want (%#v, %v)", decision, acquireErr, test.decision, test.err)
 			}
 			if len(observer.observations) != 1 {
 				t.Fatalf("observations = %#v; want one", observer.observations)
 			}
-			want := Observation{Backend: "redis", Result: test.wantResult, Duration: 5 * time.Millisecond}
+			want := Observation{
+				Backend:          "redis",
+				Result:           test.wantResult,
+				Duration:         5 * time.Millisecond,
+				RequestedPermits: test.permits,
+				GrantedPermits:   test.decision.Granted,
+			}
 			if observer.observations[0] != want {
 				t.Fatalf("observation = %#v; want %#v", observer.observations[0], want)
 			}
@@ -81,7 +93,7 @@ type stubLimiter struct {
 	err      error
 }
 
-func (l *stubLimiter) TryAcquire(context.Context, Limit) (Decision, error) {
+func (l *stubLimiter) TryAcquire(context.Context, Limit, int) (Decision, error) {
 	return l.decision, l.err
 }
 

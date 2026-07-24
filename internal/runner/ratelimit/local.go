@@ -27,12 +27,15 @@ func newLocalLimiter(now func() time.Time) *LocalLimiter {
 	return &LocalLimiter{now: now}
 }
 
-func (l *LocalLimiter) TryAcquire(ctx context.Context, limit Limit) (Decision, error) {
+func (l *LocalLimiter) TryAcquire(ctx context.Context, limit Limit, permits int) (Decision, error) {
 	if err := ctx.Err(); err != nil {
 		return Decision{}, err
 	}
 	if err := limit.Validate(); err != nil {
 		return Decision{}, fmt.Errorf("validate rate limit: %w", err)
+	}
+	if err := validatePermits(limit, permits); err != nil {
+		return Decision{}, fmt.Errorf("validate rate limit permits: %w", err)
 	}
 
 	now := l.now()
@@ -45,12 +48,12 @@ func (l *LocalLimiter) TryAcquire(ctx context.Context, limit Limit) (Decision, e
 		l.windowStart = windowStart
 		l.used = 0
 	}
-	if l.used >= limit.Requests {
-		return Decision{
-			RetryAfter: windowStart.Add(limit.Window).Sub(now),
-		}, nil
+	remaining := limit.Requests - l.used
+	granted := min(permits, max(remaining, 0))
+	l.used += granted
+	decision := Decision{Granted: granted}
+	if granted < permits {
+		decision.RetryAfter = windowStart.Add(limit.Window).Sub(now)
 	}
-
-	l.used++
-	return Decision{Allowed: true}, nil
+	return decision, nil
 }

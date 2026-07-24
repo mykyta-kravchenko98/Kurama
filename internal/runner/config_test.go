@@ -25,6 +25,17 @@ func TestConfigValidateUniformSchedule(t *testing.T) {
 	}
 }
 
+func TestConfigValidateBurstProfile(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Rate.Profile = &RateProfileConfig{
+		Type: "burst", MinBurstSize: 5, MaxBurstSize: 15, DelayDivisor: 10,
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("valid burst profile rejected: %v", err)
+	}
+}
+
 func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -50,8 +61,34 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 			c.Rate.Limiter = &RateLimiterConfig{Type: "postgres"}
 		}, wantErr: "rate.limiter.type"},
 		{name: "unknown profile", mutate: func(c *Config) {
-			c.Rate.Profile = &RateProfileConfig{Type: "burst"}
+			c.Rate.Profile = &RateProfileConfig{Type: "normal"}
 		}, wantErr: "rate.profile.type"},
+		{name: "fixed profile with burst fields", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "fixed", MinBurstSize: 5}
+		}, wantErr: "must not set burst"},
+		{name: "uniform profile with burst fields", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "uniform", MaxBurstSize: 15}
+		}, wantErr: "must not set burst"},
+		{name: "fixed profile with delay divisor", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "fixed", DelayDivisor: 10}
+		}, wantErr: "must not set burst"},
+		{name: "burst profile below minimum", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst", MinBurstSize: 1, MaxBurstSize: 15}
+		}, wantErr: "minBurstSize"},
+		{name: "burst profile inverted range", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst", MinBurstSize: 15, MaxBurstSize: 5}
+		}, wantErr: "maxBurstSize"},
+		{name: "burst profile above maximum", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst", MinBurstSize: 5, MaxBurstSize: MaxProfileBurstSize + 1}
+		}, wantErr: "maxBurstSize"},
+		{name: "burst profile delay divisor below minimum", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{Type: "burst", MinBurstSize: 5, MaxBurstSize: 15, DelayDivisor: 1}
+		}, wantErr: "delayDivisor"},
+		{name: "burst profile delay divisor above maximum", mutate: func(c *Config) {
+			c.Rate.Profile = &RateProfileConfig{
+				Type: "burst", MinBurstSize: 5, MaxBurstSize: 15, DelayDivisor: MaxProfileDelayDivisor + 1,
+			}
+		}, wantErr: "delayDivisor"},
 		{name: "duplicate store", mutate: func(c *Config) { c.Stores = append(c.Stores, c.Stores[0]) }, wantErr: "duplicated"},
 		{name: "oversized body", mutate: func(c *Config) { c.Operations[0].Request.BodyTemplate = strings.Repeat("x", MaxRequestBodyBytes+1) }, wantErr: "exceeds"},
 		{name: "GET body", mutate: func(c *Config) { c.Operations[1].Request.BodyTemplate = "{}" }, wantErr: "GET request"},
