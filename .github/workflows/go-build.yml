@@ -34,6 +34,38 @@ on:
       - ".github/workflows/go-build.yml"
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      runtime: ${{ steps.filter.outputs.runtime }}
+      crd: ${{ steps.filter.outputs.crd }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect runtime and CRD changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            runtime:
+              - "cmd/**"
+              - "api/**"
+              - "internal/**"
+              - "go.mod"
+              - "go.sum"
+              - "Dockerfile"
+              - ".dockerignore"
+            crd:
+              - "config/crd/bases/**"
+
   build:
     name: Build, lint and test
     runs-on: ubuntu-latest
@@ -67,8 +99,11 @@ jobs:
 
   image:
     name: Build and push image
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, build]
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -104,7 +139,15 @@ jobs:
 
   sync-gitops:
     name: Sync CRD and image digest to shorturl-gitops
-    needs: image
+    needs: [changes, build, image]
+    if: >
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.result == 'success' &&
+      needs.build.result == 'success' &&
+      (needs.changes.outputs.runtime == 'true' || needs.changes.outputs.crd == 'true') &&
+      (needs.changes.outputs.runtime != 'true' || needs.image.result == 'success')
     runs-on: ubuntu-latest
 
     steps:
@@ -115,28 +158,37 @@ jobs:
         env:
           GITOPS_TOKEN: ${{ secrets.GITOPS_DEPLOY_TOKEN }}
           NEW_DIGEST: ${{ needs.image.outputs.digest }}
+          RUNTIME_CHANGED: ${{ needs.changes.outputs.runtime }}
+          CRD_CHANGED: ${{ needs.changes.outputs.crd }}
         run: |
           git clone https://x-access-token:${GITOPS_TOKEN}@github.com/mykyta-kravchenko98/shorturl-gitops.git gitops-repo
           cd gitops-repo
 
-          sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          {
-            echo "# Auto-synced by Kurama's CI from config/crd/bases on every push to main."
-            echo "# Do not edit this copy directly."
-            cat ../config/crd/bases/traffic.kurama.dev_trafficscenarios.yaml
-          } > k8s/kurama/crd.yaml
+          if [ "${CRD_CHANGED}" = "true" ]; then
+            {
+              echo "# Auto-synced by Kurama's CI from config/crd/bases."
+              echo "# Do not edit this copy directly."
+              cat ../config/crd/bases/traffic.kurama.dev_trafficscenarios.yaml
+            } > k8s/kurama/crd.yaml
+          fi
 
-          IMAGE_REF="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE}@${NEW_DIGEST}"
-          export IMAGE_REF
-          yq -i '(.spec.template.spec.containers[] | select(.name == "manager").image) = strenv(IMAGE_REF)' \
-            k8s/kurama/deployment.yaml
-          yq -i '(.spec.template.spec.containers[] | select(.name == "manager").env[] | select(.name == "KURAMA_RUNNER_IMAGE").value) = strenv(IMAGE_REF)' \
-            k8s/kurama/deployment.yaml
+          if [ "${RUNTIME_CHANGED}" = "true" ]; then
+            if [ -z "${NEW_DIGEST}" ]; then
+              echo "image digest is required for a runtime change"
+              exit 1
+            fi
+            sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+            sudo chmod +x /usr/local/bin/yq
+            IMAGE_REF="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE}@${NEW_DIGEST}"
+            export IMAGE_REF
+            yq -i '(.spec.template.spec.containers[] | select(.name == "manager").image) = strenv(IMAGE_REF)' \
+              k8s/kurama/deployment.yaml
+            yq -i '(.spec.template.spec.containers[] | select(.name == "manager").env[] | select(.name == "KURAMA_RUNNER_IMAGE").value) = strenv(IMAGE_REF)' \
+              k8s/kurama/deployment.yaml
+          fi
 
           git add k8s/kurama/crd.yaml k8s/kurama/deployment.yaml
           if git diff --cached --quiet; then
@@ -144,7 +196,14 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore: sync CRD and bump kurama image digest"
+          if [ "${RUNTIME_CHANGED}" = "true" ] && [ "${CRD_CHANGED}" = "true" ]; then
+            COMMIT_MESSAGE="chore: sync Kurama CRD and image digest"
+          elif [ "${RUNTIME_CHANGED}" = "true" ]; then
+            COMMIT_MESSAGE="chore: bump Kurama image digest"
+          else
+            COMMIT_MESSAGE="chore: sync Kurama CRD"
+          fi
+          git commit -m "${COMMIT_MESSAGE}"
           for attempt in 1 2 3 4 5; do
             if git push; then
               exit 0
