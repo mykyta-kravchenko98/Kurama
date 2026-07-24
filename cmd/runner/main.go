@@ -67,6 +67,9 @@ func runWithMetricsAddress(
 	); err != nil {
 		return fmt.Errorf("instrument runner state: %w", err)
 	}
+	if err := runner.RegisterPrometheusRateProfileMetrics(registry, config.Rate.Profile); err != nil {
+		return fmt.Errorf("register rate profile metrics: %w", err)
+	}
 	scheduler, err := newRunnerScheduler(config, state, schedulerOptions...)
 	if err != nil {
 		return err
