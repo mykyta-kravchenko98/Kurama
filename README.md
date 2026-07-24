@@ -120,6 +120,9 @@ turning it into an in-house replacement for a complete load-testing platform.
   value to be selected for each configured time window.
 - Exported the current selected RPM, schedule resolution results and resolution
   latency through the runner Prometheus endpoint.
+- Exported the effective burst size bounds and delay divisor, allowing
+  provisioned dashboards to follow scenario configuration without embedding
+  static values in dashboard JSON.
 - Added manager and runner health/readiness endpoints and generated startup,
   liveness and readiness probes for runner Deployments.
 - Kept existing runner replicas available during updates with an explicit
