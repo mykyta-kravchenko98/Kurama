@@ -7,12 +7,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
@@ -48,6 +48,9 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, fmt.Errorf("get runner deployment: %w", err)
 		}
 		if err == nil {
+			if err := ensureControlledBy(&deployment, &scenario, "Deployment"); err != nil {
+				return r.failed(ctx, &scenario, err)
+			}
 			if err := r.Delete(ctx, &deployment); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete suspended runner deployment: %w", err)
 			}
@@ -65,56 +68,16 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	configMap := desiredConfigMap(&scenario, name)
-	if err := controllerutil.SetControllerReference(&scenario, configMap, r.Scheme); err != nil {
-		return ctrl.Result{}, fmt.Errorf("set ConfigMap owner: %w", err)
-	}
-	if err := r.applyConfigMap(ctx, configMap); err != nil {
+	if err := r.applyConfigMap(ctx, &scenario, configMap); err != nil {
 		return r.failed(ctx, &scenario, err)
 	}
 
 	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret, r.RedisAddress)
-	if err := controllerutil.SetControllerReference(&scenario, deployment, r.Scheme); err != nil {
-		return ctrl.Result{}, fmt.Errorf("set Deployment owner: %w", err)
-	}
-	if err := r.applyDeployment(ctx, deployment); err != nil {
+	if err := r.applyDeployment(ctx, &scenario, deployment); err != nil {
 		return r.failed(ctx, &scenario, err)
 	}
 
 	return r.succeeded(ctx, &scenario, trafficv1alpha1.PhaseReady)
-}
-
-func (r *TrafficScenarioReconciler) applyConfigMap(ctx context.Context, desired *corev1.ConfigMap) error {
-	var existing corev1.ConfigMap
-	key := client.ObjectKeyFromObject(desired)
-	if err := r.Get(ctx, key, &existing); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.Create(ctx, desired)
-		}
-		return fmt.Errorf("get runner ConfigMap: %w", err)
-	}
-	existing.Labels = desired.Labels
-	existing.Data = desired.Data
-	if err := r.Update(ctx, &existing); err != nil {
-		return fmt.Errorf("update runner ConfigMap: %w", err)
-	}
-	return nil
-}
-
-func (r *TrafficScenarioReconciler) applyDeployment(ctx context.Context, desired *appsv1.Deployment) error {
-	var existing appsv1.Deployment
-	key := client.ObjectKeyFromObject(desired)
-	if err := r.Get(ctx, key, &existing); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.Create(ctx, desired)
-		}
-		return fmt.Errorf("get runner deployment: %w", err)
-	}
-	existing.Labels = desired.Labels
-	existing.Spec = desired.Spec
-	if err := r.Update(ctx, &existing); err != nil {
-		return fmt.Errorf("update runner deployment: %w", err)
-	}
-	return nil
 }
 
 func (r *TrafficScenarioReconciler) succeeded(
@@ -122,10 +85,14 @@ func (r *TrafficScenarioReconciler) succeeded(
 	scenario *trafficv1alpha1.TrafficScenario,
 	phase trafficv1alpha1.TrafficScenarioPhase,
 ) (ctrl.Result, error) {
+	before := scenario.DeepCopy()
 	scenario.Status.Phase = phase
 	scenario.Status.Message = ""
 	scenario.Status.ObservedGeneration = scenario.Generation
-	if err := r.Status().Update(ctx, scenario); err != nil {
+	if apiequality.Semantic.DeepEqual(before.Status, scenario.Status) {
+		return ctrl.Result{}, nil
+	}
+	if err := r.Status().Patch(ctx, scenario, client.MergeFrom(before)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update TrafficScenario status: %w", err)
 	}
 	return ctrl.Result{}, nil
@@ -136,10 +103,14 @@ func (r *TrafficScenarioReconciler) failed(
 	scenario *trafficv1alpha1.TrafficScenario,
 	cause error,
 ) (ctrl.Result, error) {
+	before := scenario.DeepCopy()
 	scenario.Status.Phase = trafficv1alpha1.PhaseFailed
 	scenario.Status.Message = cause.Error()
-	if err := r.Status().Update(ctx, scenario); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update failed TrafficScenario status: %w", err)
+	scenario.Status.ObservedGeneration = scenario.Generation
+	if !apiequality.Semantic.DeepEqual(before.Status, scenario.Status) {
+		if err := r.Status().Patch(ctx, scenario, client.MergeFrom(before)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update failed TrafficScenario status: %w", err)
+		}
 	}
 	return ctrl.Result{}, cause
 }

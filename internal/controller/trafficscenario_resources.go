@@ -16,6 +16,7 @@ import (
 const (
 	componentLabel                = "app.kubernetes.io/component"
 	scenarioLabel                 = "traffic.kurama.dev/scenario"
+	scenarioConfigKey             = "scenario.json"
 	configHashAnnotation          = "traffic.kurama.dev/config-hash"
 	runnerRevisionHistoryLimit    = int32(5)
 	runnerProgressDeadlineSeconds = int32(120)
@@ -25,7 +26,7 @@ func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *c
 	config := scenarioConfigJSON(scenario)
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels(scenario)},
-		Data:       map[string]string{"scenario.json": config},
+		Data:       map[string]string{scenarioConfigKey: config},
 	}
 }
 
@@ -96,8 +97,9 @@ func runnerHTTPProbe(path string, periodSeconds, failureThreshold int32) *corev1
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
-				Path: path,
-				Port: intstr.FromString(runner.MetricsPortName),
+				Path:   path,
+				Port:   intstr.FromString(runner.MetricsPortName),
+				Scheme: corev1.URISchemeHTTP,
 			},
 		},
 		TimeoutSeconds:   1,
@@ -118,7 +120,8 @@ func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress s
 		corev1.EnvVar{
 			Name: runner.NamespaceEnv,
 			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
-				FieldPath: "metadata.namespace",
+				APIVersion: "v1",
+				FieldPath:  "metadata.namespace",
 			}},
 		},
 		corev1.EnvVar{Name: runner.ScenarioEnv, Value: scenario.Name},

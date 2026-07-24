@@ -10,8 +10,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
@@ -92,6 +95,268 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
+	}
+}
+
+func TestReconcileDoesNotWriteUnchangedResources(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 3,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var defaultedDeployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &defaultedDeployment); err != nil {
+		t.Fatalf("get Deployment for API defaults: %v", err)
+	}
+	defaultMode := int32(0o644)
+	defaultedDeployment.Spec.Template.Spec.Volumes[0].ConfigMap.DefaultMode = &defaultMode
+	defaultedDeployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+	defaultedDeployment.Spec.Template.Spec.Containers[0].TerminationMessagePath = "/dev/termination-log"
+	defaultedDeployment.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
+	defaultedDeployment.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirst
+	if err := fakeClient.Update(ctx, &defaultedDeployment); err != nil {
+		t.Fatalf("apply simulated API defaults: %v", err)
+	}
+
+	var configMapBefore corev1.ConfigMap
+	var deploymentBefore appsv1.Deployment
+	var scenarioBefore trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, key, &configMapBefore); err != nil {
+		t.Fatalf("get ConfigMap before second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, key, &deploymentBefore); err != nil {
+		t.Fatalf("get Deployment before second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &scenarioBefore); err != nil {
+		t.Fatalf("get TrafficScenario before second reconcile: %v", err)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	var configMapAfter corev1.ConfigMap
+	var deploymentAfter appsv1.Deployment
+	var scenarioAfter trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, key, &configMapAfter); err != nil {
+		t.Fatalf("get ConfigMap after second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, key, &deploymentAfter); err != nil {
+		t.Fatalf("get Deployment after second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &scenarioAfter); err != nil {
+		t.Fatalf("get TrafficScenario after second reconcile: %v", err)
+	}
+	if configMapAfter.ResourceVersion != configMapBefore.ResourceVersion {
+		t.Errorf(
+			"ConfigMap resourceVersion changed from %q to %q",
+			configMapBefore.ResourceVersion,
+			configMapAfter.ResourceVersion,
+		)
+	}
+	if deploymentAfter.ResourceVersion != deploymentBefore.ResourceVersion {
+		t.Errorf(
+			"Deployment resourceVersion changed from %q to %q",
+			deploymentBefore.ResourceVersion,
+			deploymentAfter.ResourceVersion,
+		)
+	}
+	if scenarioAfter.ResourceVersion != scenarioBefore.ResourceVersion {
+		t.Errorf(
+			"TrafficScenario resourceVersion changed from %q to %q",
+			scenarioBefore.ResourceVersion,
+			scenarioAfter.ResourceVersion,
+		)
+	}
+}
+
+func TestReconcilePreservesUnmanagedResourceFields(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 1,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:first",
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var configMap corev1.ConfigMap
+	if err := fakeClient.Get(ctx, key, &configMap); err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	configMap.Labels["example.test/custom"] = "preserved"
+	configMap.Data["custom"] = "preserved"
+	if err := fakeClient.Update(ctx, &configMap); err != nil {
+		t.Fatalf("update ConfigMap: %v", err)
+	}
+
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	deployment.Labels["example.test/custom"] = "preserved"
+	deployment.Annotations = map[string]string{"example.test/custom": "preserved"}
+	deployment.Spec.Template.Annotations["example.test/custom"] = "preserved"
+	deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	deployment.Spec.Template.Spec.Containers = append(
+		deployment.Spec.Template.Spec.Containers,
+		corev1.Container{Name: "injected", Image: "example.test/sidecar:test"},
+	)
+	if err := fakeClient.Update(ctx, &deployment); err != nil {
+		t.Fatalf("update Deployment: %v", err)
+	}
+
+	var updatedScenario trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &updatedScenario); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	updatedScenario.Spec.Operations[0].Weight++
+	updatedScenario.Generation++
+	if err := fakeClient.Update(ctx, &updatedScenario); err != nil {
+		t.Fatalf("update TrafficScenario: %v", err)
+	}
+	reconciler.RunnerImage = "example.test/kurama:second"
+	if _, err := reconciler.Reconcile(ctx, requestFor(&updatedScenario)); err != nil {
+		t.Fatalf("reconcile changed scenario: %v", err)
+	}
+
+	if err := fakeClient.Get(ctx, key, &configMap); err != nil {
+		t.Fatalf("get reconciled ConfigMap: %v", err)
+	}
+	if configMap.Labels["example.test/custom"] != "preserved" || configMap.Data["custom"] != "preserved" {
+		t.Fatalf("unmanaged ConfigMap fields were not preserved: %#v", configMap)
+	}
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get reconciled Deployment: %v", err)
+	}
+	if deployment.Labels["example.test/custom"] != "preserved" ||
+		deployment.Annotations["example.test/custom"] != "preserved" ||
+		deployment.Spec.Template.Annotations["example.test/custom"] != "preserved" {
+		t.Fatalf("unmanaged Deployment metadata was not preserved: %#v", deployment.ObjectMeta)
+	}
+	runnerContainer := deployment.Spec.Template.Spec.Containers[0]
+	if runnerContainer.Image != "example.test/kurama:second" ||
+		runnerContainer.ImagePullPolicy != corev1.PullAlways {
+		t.Fatalf("runner container = %#v", runnerContainer)
+	}
+	if len(deployment.Spec.Template.Spec.Containers) != 2 ||
+		deployment.Spec.Template.Spec.Containers[1].Name != "injected" {
+		t.Fatalf("injected sidecar was not preserved: %#v", deployment.Spec.Template.Spec.Containers)
+	}
+}
+
+func TestReconcileRefusesToModifyForeignOwnedDeployment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 1,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:first",
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	deployment.Spec.Template.Spec.Containers[0].Image = "example.test/foreign:keep"
+	deployment.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "example.test/v1",
+		Kind:       "ForeignOwner",
+		Name:       "foreign",
+		UID:        types.UID("foreign-uid"),
+		Controller: ptr.To(true),
+	}}
+	if err := fakeClient.Update(ctx, &deployment); err != nil {
+		t.Fatalf("replace Deployment owner: %v", err)
+	}
+
+	reconciler.RunnerImage = "example.test/kurama:second"
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err == nil {
+		t.Fatal("reconcile foreign-owned Deployment error = nil")
+	}
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment after rejected reconcile: %v", err)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "example.test/foreign:keep" {
+		t.Fatalf("foreign-owned Deployment image = %q", got)
+	}
+}
+
+func TestReconcileRefusesToAdoptExistingConfigMap(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 1,
+		},
+		Spec: validScenarioSpec(),
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl-runner", Namespace: scenario.Namespace},
+		Data:       map[string]string{scenarioConfigKey: "foreign-data"},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario, configMap).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err == nil {
+		t.Fatal("reconcile existing ConfigMap error = nil")
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap); err != nil {
+		t.Fatalf("get ConfigMap after rejected reconcile: %v", err)
+	}
+	if got := configMap.Data[scenarioConfigKey]; got != "foreign-data" {
+		t.Fatalf("unowned ConfigMap data = %q", got)
 	}
 }
 
@@ -320,6 +585,10 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 		Spec:       trafficv1alpha1.TrafficScenarioSpec{Suspend: true},
 	}
 	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "", "")
+	scenario.UID = types.UID("scenario-uid")
+	if err := controllerutil.SetControllerReference(scenario, deployment, scheme); err != nil {
+		t.Fatalf("set Deployment owner: %v", err)
+	}
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario, deployment).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
 
