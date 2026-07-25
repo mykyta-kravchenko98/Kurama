@@ -32,8 +32,12 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test", RunnerImagePullSecret: "registry-secret"}
 
-	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != rolloutRequeueInterval {
+		t.Fatalf("requeueAfter = %v, want %v", result.RequeueAfter, rolloutRequeueInterval)
 	}
 
 	var configMap corev1.ConfigMap
@@ -97,6 +101,131 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
 		t.Fatal("runner config hash annotation is empty")
 	}
+
+	var actualScenario trafficv1alpha1.TrafficScenario
+	if err := client.Get(ctx, types.NamespacedName{
+		Namespace: scenario.Namespace,
+		Name:      scenario.Name,
+	}, &actualScenario); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actualScenario.Status.Phase != trafficv1alpha1.PhaseProgressing {
+		t.Fatalf("scenario phase = %q, want %q", actualScenario.Status.Phase, trafficv1alpha1.PhaseProgressing)
+	}
+	assertScenarioCondition(t, actualScenario.Status, trafficv1alpha1.ConditionProgressing, metav1.ConditionTrue)
+	assertScenarioCondition(t, actualScenario.Status, trafficv1alpha1.ConditionReady, metav1.ConditionFalse)
+}
+
+func TestReconcileReportsReadyDeployment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 3,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario, &appsv1.Deployment{}).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+	deployment.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:   appsv1.DeploymentAvailable,
+		Status: corev1.ConditionTrue,
+		Reason: "MinimumReplicasAvailable",
+	}}
+	if err := fakeClient.Status().Update(ctx, &deployment); err != nil {
+		t.Fatalf("update Deployment status: %v", err)
+	}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
+		t.Fatalf("ready reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("requeueAfter = %v, want zero", result.RequeueAfter)
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseReady {
+		t.Fatalf("scenario phase = %q, want %q", actual.Status.Phase, trafficv1alpha1.PhaseReady)
+	}
+	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionReady, metav1.ConditionTrue)
+	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionProgressing, metav1.ConditionFalse)
+}
+
+func TestReconcileReportsFailedDeploymentRollout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 3,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario, &appsv1.Deployment{}).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:    appsv1.DeploymentProgressing,
+		Status:  corev1.ConditionFalse,
+		Reason:  "ProgressDeadlineExceeded",
+		Message: `ReplicaSet "shorturl-runner-broken" has timed out progressing`,
+	}}
+	if err := fakeClient.Status().Update(ctx, &deployment); err != nil {
+		t.Fatalf("update Deployment status: %v", err)
+	}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
+		t.Fatalf("degraded reconcile: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("requeueAfter = %v, want zero", result.RequeueAfter)
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseDegraded {
+		t.Fatalf("scenario phase = %q, want %q", actual.Status.Phase, trafficv1alpha1.PhaseDegraded)
+	}
+	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionDegraded, metav1.ConditionTrue)
 }
 
 func TestReconcileDoesNotWriteUnchangedResources(t *testing.T) {
@@ -593,13 +722,74 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(scenario).WithObjects(scenario, deployment).Build()
 	reconciler := &TrafficScenarioReconciler{Client: client, Scheme: scheme, RunnerImage: "example.test/kurama:test"}
 
-	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
 		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != rolloutRequeueInterval {
+		t.Fatalf("requeueAfter = %v, want %v", result.RequeueAfter, rolloutRequeueInterval)
 	}
 	var actual appsv1.Deployment
 	if err := client.Get(ctx, types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}, &actual); err == nil {
 		t.Fatal("runner Deployment still exists after suspension")
 	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("reconcile deleted Deployment: %v", err)
+	}
+	var actualScenario trafficv1alpha1.TrafficScenario
+	if err := client.Get(ctx, types.NamespacedName{
+		Namespace: scenario.Namespace,
+		Name:      scenario.Name,
+	}, &actualScenario); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actualScenario.Status.Phase != trafficv1alpha1.PhaseSuspended {
+		t.Fatalf("scenario phase = %q, want %q", actualScenario.Status.Phase, trafficv1alpha1.PhaseSuspended)
+	}
+	assertScenarioCondition(t, actualScenario.Status, trafficv1alpha1.ConditionSuspended, metav1.ConditionTrue)
+}
+
+func TestReconcileInvalidScenarioDoesNotRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", Generation: 4},
+		Spec:       validScenarioSpec(),
+	}
+	scenario.Spec.Target.BaseURL = "postgres://database"
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
+		t.Fatalf("reconcile returned retryable error: %v", err)
+	}
+	if result.RequeueAfter != 0 || result.Requeue {
+		t.Fatalf("reconcile result = %#v, want no retry", result)
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if actual.Status.Phase != trafficv1alpha1.PhaseFailed {
+		t.Fatalf("scenario phase = %q, want %q", actual.Status.Phase, trafficv1alpha1.PhaseFailed)
+	}
+	if actual.Status.ObservedGeneration != scenario.Generation {
+		t.Fatalf(
+			"observedGeneration = %d, want %d",
+			actual.Status.ObservedGeneration,
+			scenario.Generation,
+		)
+	}
+	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionDegraded, metav1.ConditionTrue)
 }
 
 func TestValidateScenarioRejectsNonHTTPURL(t *testing.T) {
@@ -836,6 +1026,33 @@ func TestReconcileLongScenarioNameIsIdempotent(t *testing.T) {
 	if deploymentAfter.ResourceVersion != deploymentBefore.ResourceVersion {
 		t.Errorf("Deployment was updated by unchanged reconcile")
 	}
+}
+
+func assertScenarioCondition(
+	t *testing.T,
+	status trafficv1alpha1.TrafficScenarioStatus,
+	conditionType string,
+	want metav1.ConditionStatus,
+) {
+	t.Helper()
+	for _, condition := range status.Conditions {
+		if condition.Type != conditionType {
+			continue
+		}
+		if condition.Status != want {
+			t.Errorf("condition %q status = %q, want %q", conditionType, condition.Status, want)
+		}
+		if condition.ObservedGeneration != status.ObservedGeneration {
+			t.Errorf(
+				"condition %q observedGeneration = %d, want %d",
+				conditionType,
+				condition.ObservedGeneration,
+				status.ObservedGeneration,
+			)
+		}
+		return
+	}
+	t.Errorf("condition %q is missing from %#v", conditionType, status.Conditions)
 }
 
 func validScenarioSpec() trafficv1alpha1.TrafficScenarioSpec {

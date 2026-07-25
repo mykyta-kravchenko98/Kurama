@@ -7,7 +7,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,74 +44,103 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		var deployment appsv1.Deployment
 		err := r.Get(ctx, types.NamespacedName{Namespace: scenario.Namespace, Name: name}, &deployment)
 		if err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get runner deployment: %w", err)
+			return r.failed(
+				ctx,
+				&scenario,
+				reasonReconcileFailed,
+				fmt.Errorf("get runner deployment: %w", err),
+				true,
+			)
 		}
 		if err == nil {
 			if err := ensureControlledBy(&deployment, &scenario, "Deployment"); err != nil {
-				return r.failed(ctx, &scenario, err)
+				return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
 			}
-			if err := r.Delete(ctx, &deployment); err != nil {
-				return ctrl.Result{}, fmt.Errorf("delete suspended runner deployment: %w", err)
+			if err := r.Delete(ctx, &deployment); err != nil && !apierrors.IsNotFound(err) {
+				return r.failed(
+					ctx,
+					&scenario,
+					reasonReconcileFailed,
+					fmt.Errorf("delete suspended runner deployment: %w", err),
+					true,
+				)
 			}
+			return r.reconcileResultForState(
+				ctx,
+				&scenario,
+				progressingState(reasonRunnerDeletionRequested, "Runner Deployment deletion is in progress"),
+			)
 		}
-		return r.succeeded(ctx, &scenario, trafficv1alpha1.PhaseSuspended)
+		return r.reconcileResultForState(ctx, &scenario, scenarioState{
+			phase:           trafficv1alpha1.PhaseSuspended,
+			activeCondition: trafficv1alpha1.ConditionSuspended,
+			reason:          reasonScenarioSuspended,
+			message:         "Traffic generation is suspended",
+		})
 	}
 	if err := validateScenario(&scenario); err != nil {
-		return r.failed(ctx, &scenario, err)
+		return r.failed(ctx, &scenario, reasonValidationFailed, err, false)
 	}
 	if r.RunnerImage == "" {
-		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"))
+		return r.failed(
+			ctx,
+			&scenario,
+			reasonControllerConfigurationInvalid,
+			fmt.Errorf("controller is missing KURAMA_RUNNER_IMAGE"),
+			true,
+		)
 	}
 	if requiresRedis(&scenario) && r.RedisAddress == "" {
-		return r.failed(ctx, &scenario, fmt.Errorf("controller is missing %s", runner.RedisAddressEnv))
+		return r.failed(
+			ctx,
+			&scenario,
+			reasonControllerConfigurationInvalid,
+			fmt.Errorf("controller is missing %s", runner.RedisAddressEnv),
+			true,
+		)
 	}
 
 	configMap := desiredConfigMap(&scenario, name)
 	if err := r.applyConfigMap(ctx, &scenario, configMap); err != nil {
-		return r.failed(ctx, &scenario, err)
+		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
 	}
 
 	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret, r.RedisAddress)
 	if err := r.applyDeployment(ctx, &scenario, deployment); err != nil {
-		return r.failed(ctx, &scenario, err)
+		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
 	}
 
-	return r.succeeded(ctx, &scenario, trafficv1alpha1.PhaseReady)
-}
-
-func (r *TrafficScenarioReconciler) succeeded(
-	ctx context.Context,
-	scenario *trafficv1alpha1.TrafficScenario,
-	phase trafficv1alpha1.TrafficScenarioPhase,
-) (ctrl.Result, error) {
-	before := scenario.DeepCopy()
-	scenario.Status.Phase = phase
-	scenario.Status.Message = ""
-	scenario.Status.ObservedGeneration = scenario.Generation
-	if apiequality.Semantic.DeepEqual(before.Status, scenario.Status) {
-		return ctrl.Result{}, nil
+	var currentDeployment appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Namespace: scenario.Namespace, Name: name}, &currentDeployment); err != nil {
+		return r.failed(
+			ctx,
+			&scenario,
+			reasonReconcileFailed,
+			fmt.Errorf("get reconciled runner Deployment: %w", err),
+			true,
+		)
 	}
-	if err := r.Status().Patch(ctx, scenario, client.MergeFrom(before)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update TrafficScenario status: %w", err)
+	if err := ensureControlledBy(&currentDeployment, &scenario, "Deployment"); err != nil {
+		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
 	}
-	return ctrl.Result{}, nil
+	return r.reconcileResultForState(ctx, &scenario, stateFromDeployment(&currentDeployment))
 }
 
 func (r *TrafficScenarioReconciler) failed(
 	ctx context.Context,
 	scenario *trafficv1alpha1.TrafficScenario,
+	reason string,
 	cause error,
+	retry bool,
 ) (ctrl.Result, error) {
-	before := scenario.DeepCopy()
-	scenario.Status.Phase = trafficv1alpha1.PhaseFailed
-	scenario.Status.Message = cause.Error()
-	scenario.Status.ObservedGeneration = scenario.Generation
-	if !apiequality.Semantic.DeepEqual(before.Status, scenario.Status) {
-		if err := r.Status().Patch(ctx, scenario, client.MergeFrom(before)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update failed TrafficScenario status: %w", err)
-		}
+	state := degradedState(trafficv1alpha1.PhaseFailed, reason, cause.Error())
+	if err := r.updateScenarioStatus(ctx, scenario, state); err != nil {
+		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, cause
+	if retry {
+		return ctrl.Result{}, cause
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *TrafficScenarioReconciler) SetupWithManager(mgr ctrl.Manager) error {
