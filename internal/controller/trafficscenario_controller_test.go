@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -704,6 +705,136 @@ func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
 	after := desiredDeployment(scenario, "shorturl-runner", "image", "", "").Spec.Template.Annotations[configHashAnnotation]
 	if before == after {
 		t.Fatal("config hash did not change after scenario update")
+	}
+}
+
+func TestRunnerNamePreservesShortNamesAndHashesLongNames(t *testing.T) {
+	t.Parallel()
+
+	if got := runnerName("shorturl"); got != "shorturl-runner" {
+		t.Fatalf("runnerName(shorturl) = %q", got)
+	}
+
+	commonPrefix := strings.Repeat("a", 80)
+	first := runnerName(commonPrefix + "first")
+	second := runnerName(commonPrefix + "second")
+	if first == second {
+		t.Fatalf("long scenario names collided at %q", first)
+	}
+	for _, name := range []string{
+		first,
+		second,
+		runnerName(strings.Repeat("a", 46) + "." + strings.Repeat("b", 40)),
+	} {
+		if len(name) > maxRunnerNameLength {
+			t.Errorf("runner name %q has length %d", name, len(name))
+		}
+		if !strings.HasSuffix(name, runnerNameSuffix) {
+			t.Errorf("runner name %q does not end with %q", name, runnerNameSuffix)
+		}
+		if problems := k8svalidation.IsDNS1123Subdomain(name); len(problems) != 0 {
+			t.Errorf("runner name %q is invalid: %v", name, problems)
+		}
+	}
+}
+
+func TestLongScenarioUsesSafeLabelAndFullNameAnnotation(t *testing.T) {
+	t.Parallel()
+
+	mediumName := strings.Repeat("a", 60)
+	mediumScenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{Name: mediumName},
+	}
+	if got := labels(mediumScenario)[scenarioLabel]; got != mediumName {
+		t.Errorf("60-character scenario label = %q, want original name", got)
+	}
+	if got := scenarioAnnotations(mediumScenario)[scenarioNameAnnotation]; got != mediumName {
+		t.Errorf("60-character scenario annotation = %q, want original name", got)
+	}
+
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      strings.Repeat("long-scenario-", 8) + "one",
+			Namespace: "shorturl",
+		},
+		Spec: validScenarioSpec(),
+	}
+	name := runnerName(scenario.Name)
+	configMap := desiredConfigMap(scenario, name)
+	deployment := desiredDeployment(scenario, name, "example.test/kurama:test", "", "")
+
+	wantLabel := hashedScenarioLabelPrefix + scenarioHash(scenario.Name)
+	if got := configMap.Labels[scenarioLabel]; got != wantLabel {
+		t.Errorf("ConfigMap scenario label = %q, want %q", got, wantLabel)
+	}
+	if problems := k8svalidation.IsValidLabelValue(wantLabel); len(problems) != 0 {
+		t.Fatalf("scenario label %q is invalid: %v", wantLabel, problems)
+	}
+	for location, annotations := range map[string]map[string]string{
+		"ConfigMap":           configMap.Annotations,
+		"Deployment":          deployment.Annotations,
+		"runner Pod template": deployment.Spec.Template.Annotations,
+	} {
+		if got := annotations[scenarioNameAnnotation]; got != scenario.Name {
+			t.Errorf("%s scenario-name annotation = %q", location, got)
+		}
+	}
+	if got := deployment.Spec.Selector.MatchLabels[scenarioLabel]; got != wantLabel {
+		t.Errorf("Deployment selector scenario label = %q, want %q", got, wantLabel)
+	}
+}
+
+func TestReconcileLongScenarioNameIsIdempotent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       strings.Repeat("long-scenario-", 8) + "one",
+			Namespace:  "shorturl",
+			UID:        types.UID("long-scenario-uid"),
+			Generation: 1,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:test",
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: runnerName(scenario.Name)}
+	var configMapBefore corev1.ConfigMap
+	var deploymentBefore appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &configMapBefore); err != nil {
+		t.Fatalf("get ConfigMap before second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, key, &deploymentBefore); err != nil {
+		t.Fatalf("get Deployment before second reconcile: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	var configMapAfter corev1.ConfigMap
+	var deploymentAfter appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &configMapAfter); err != nil {
+		t.Fatalf("get ConfigMap after second reconcile: %v", err)
+	}
+	if err := fakeClient.Get(ctx, key, &deploymentAfter); err != nil {
+		t.Fatalf("get Deployment after second reconcile: %v", err)
+	}
+	if configMapAfter.ResourceVersion != configMapBefore.ResourceVersion {
+		t.Errorf("ConfigMap was updated by unchanged reconcile")
+	}
+	if deploymentAfter.ResourceVersion != deploymentBefore.ResourceVersion {
+		t.Errorf("Deployment was updated by unchanged reconcile")
 	}
 }
 
