@@ -24,7 +24,7 @@ func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}
+	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	first := newTestRedisRateLimiter(t, firstClient, scope)
 	second := newTestRedisRateLimiter(t, secondClient, scope)
 	limit := Limit{Requests: 3, Window: time.Minute}
@@ -73,7 +73,7 @@ func TestRedisRateLimiterPartiallyGrantsBatchAcrossInstances(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}
+	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	first := newTestRedisRateLimiter(t, firstClient, scope)
 	second := newTestRedisRateLimiter(t, secondClient, scope)
 	limit := Limit{Requests: 5, Window: time.Minute}
@@ -115,7 +115,7 @@ func TestRedisRateLimiterDoesNotExceedSharedBudgetConcurrently(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}
+	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	limiters := []*RedisRateLimiter{
 		newTestRedisRateLimiter(t, firstClient, scope),
 		newTestRedisRateLimiter(t, secondClient, scope),
@@ -152,8 +152,8 @@ func TestRedisRateLimiterDoesNotExceedSharedBudgetConcurrently(t *testing.T) {
 func TestRedisRateLimiterKeepsScenariosIndependent(t *testing.T) {
 	t.Parallel()
 	_, client := newTestRedis(t)
-	first := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "first"})
-	second := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "second"})
+	first := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "first-uid"})
+	second := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "second-uid"})
 	limit := Limit{Requests: 1, Window: time.Minute}
 
 	for name, limiter := range map[string]*RedisRateLimiter{"first": first, "second": second} {
@@ -170,7 +170,7 @@ func TestRedisRateLimiterKeepsScenariosIndependent(t *testing.T) {
 func TestRedisRateLimiterReportsValidationCancellationAndRedisErrors(t *testing.T) {
 	t.Parallel()
 	server, client := newTestRedis(t)
-	limiter := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"})
+	limiter := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"})
 
 	if _, err := limiter.TryAcquire(context.Background(), Limit{}, 1); err == nil {
 		t.Fatal("invalid limit error = nil")
@@ -190,17 +190,19 @@ func TestRedisRateLimiterReportsValidationCancellationAndRedisErrors(t *testing.
 func TestNewRedisRateLimiterValidatesConfiguration(t *testing.T) {
 	t.Parallel()
 	_, client := newTestRedis(t)
-	validScope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}
+	validScope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	tests := []struct {
 		name   string
 		client redis.UniversalClient
 		scope  RedisRateLimiterScope
 	}{
 		{name: "nil client", scope: validScope},
-		{name: "empty namespace", client: client, scope: RedisRateLimiterScope{Scenario: "load"}},
-		{name: "empty scenario", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl"}},
-		{name: "namespace colon", client: client, scope: RedisRateLimiterScope{Namespace: "short:url", Scenario: "load"}},
-		{name: "scenario colon", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "lo:ad"}},
+		{name: "empty namespace", client: client, scope: RedisRateLimiterScope{Scenario: "load", UID: "scenario-uid"}},
+		{name: "empty scenario", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", UID: "scenario-uid"}},
+		{name: "empty UID", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}},
+		{name: "namespace colon", client: client, scope: RedisRateLimiterScope{Namespace: "short:url", Scenario: "load", UID: "scenario-uid"}},
+		{name: "scenario colon", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "lo:ad", UID: "scenario-uid"}},
+		{name: "UID colon", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario:uid"}},
 	}
 
 	for _, test := range tests {

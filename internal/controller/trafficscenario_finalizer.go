@@ -1,0 +1,125 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	"github.com/redis/go-redis/v9"
+
+	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+)
+
+const (
+	redisCleanupFinalizer   = "traffic.kurama.dev/redis-cleanup"
+	redisCleanupScanCount   = 100
+	deletionRequeueInterval = rolloutRequeueInterval
+)
+
+func (r *TrafficScenarioReconciler) reconcileDeletion(
+	ctx context.Context,
+	scenario *trafficv1alpha1.TrafficScenario,
+) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(scenario, redisCleanupFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	deployment := &appsv1.Deployment{}
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: runnerName(scenario.Name)}
+	if err := r.Get(ctx, key, deployment); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("get runner Deployment before Redis cleanup: %w", err)
+	} else if err == nil {
+		if err := ensureControlledBy(deployment, scenario, "Deployment"); err != nil {
+			return ctrl.Result{}, err
+		}
+		propagation := metav1.DeletePropagationForeground
+		if err := r.Delete(ctx, deployment, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil &&
+			!apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete runner Deployment before Redis cleanup: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: deletionRequeueInterval}, nil
+	}
+
+	if r.RedisClient == nil {
+		return ctrl.Result{}, fmt.Errorf("redis client is unavailable for TrafficScenario cleanup")
+	}
+	if err := deleteScenarioRedisKeys(ctx, r.RedisClient, redisCleanupScope{
+		Namespace: scenario.Namespace,
+		Scenario:  scenario.Name,
+		UID:       string(scenario.UID),
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	controllerutil.RemoveFinalizer(scenario, redisCleanupFinalizer)
+	if err := r.Update(ctx, scenario); err != nil {
+		return ctrl.Result{}, fmt.Errorf("remove Redis cleanup finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
+}
+
+type redisCleanupScope struct {
+	Namespace string
+	Scenario  string
+	UID       string
+}
+
+func deleteScenarioRedisKeys(
+	ctx context.Context,
+	redisClient redis.UniversalClient,
+	scope redisCleanupScope,
+) error {
+	if err := validateRedisCleanupScope(scope); err != nil {
+		return err
+	}
+	if redisClient == nil {
+		return fmt.Errorf("redis client must not be nil")
+	}
+
+	patterns := []string{
+		strings.Join([]string{"kurama:v1", scope.Namespace, scope.Scenario, scope.UID, "*"}, ":"),
+		strings.Join([]string{"kurama:v1:rate", scope.Namespace, scope.Scenario, scope.UID}, ":"),
+		strings.Join([]string{"kurama:v1:rate-schedule", scope.Namespace, scope.Scenario, scope.UID, "*"}, ":"),
+	}
+	keys := make([]string, 0)
+	for _, pattern := range patterns {
+		iterator := redisClient.Scan(ctx, 0, pattern, redisCleanupScanCount).Iterator()
+		for iterator.Next(ctx) {
+			keys = append(keys, iterator.Val())
+		}
+		if err := iterator.Err(); err != nil {
+			return fmt.Errorf("scan Redis keys for TrafficScenario cleanup: %w", err)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	if err := redisClient.Del(ctx, keys...).Err(); err != nil {
+		return fmt.Errorf("delete Redis keys for TrafficScenario cleanup: %w", err)
+	}
+	return nil
+}
+
+func validateRedisCleanupScope(scope redisCleanupScope) error {
+	for name, value := range map[string]string{
+		"namespace": scope.Namespace,
+		"scenario":  scope.Scenario,
+		"UID":       scope.UID,
+	} {
+		if value == "" {
+			return fmt.Errorf("redis cleanup scope %s must not be empty", name)
+		}
+		if strings.Contains(value, ":") {
+			return fmt.Errorf("redis cleanup scope %s must not contain colon", name)
+		}
+	}
+	return nil
+}

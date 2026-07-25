@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -13,7 +14,7 @@ func TestRedisStorePutRandomAndCapacity(t *testing.T) {
 	t.Parallel()
 
 	server, client := newTestRedis(t)
-	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load"},
+	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"},
 		StoreConfig{Name: "hashes", Capacity: 2},
 	)
 
@@ -46,8 +47,8 @@ func TestRedisStoreKeepsScopesAndNamedPoolsIndependent(t *testing.T) {
 
 	server, client := newTestRedis(t)
 	configs := []StoreConfig{{Name: "hashes", Capacity: 2}, {Name: "tokens", Capacity: 2}}
-	first := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "first"}, configs...)
-	second := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "second"}, configs...)
+	first := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "first-uid"}, configs...)
+	second := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "second-uid"}, configs...)
 
 	ctx := context.Background()
 	if err := first.Put(ctx, "hashes", "first-hash"); err != nil {
@@ -76,11 +77,69 @@ func TestRedisStoreKeepsScopesAndNamedPoolsIndependent(t *testing.T) {
 	}
 }
 
+func TestRedisStoreReconcileKeysExpiresRemovedStoresWithoutExtendingTTL(t *testing.T) {
+	t.Parallel()
+
+	server, client := newTestRedis(t)
+	scope := RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
+	original := newTestRedisStore(t, client, scope,
+		StoreConfig{Name: "hashes", Capacity: 2},
+		StoreConfig{Name: "tokens", Capacity: 2},
+	)
+	ctx := context.Background()
+	if err := original.Put(ctx, "hashes", "hash"); err != nil {
+		t.Fatalf("hashes Put() error = %v", err)
+	}
+	if err := original.Put(ctx, "tokens", "token"); err != nil {
+		t.Fatalf("tokens Put() error = %v", err)
+	}
+	server.SetTTL(original.key("hashes"), time.Hour)
+
+	withoutTokens := newTestRedisStore(t, client, scope,
+		StoreConfig{Name: "hashes", Capacity: 2},
+	)
+	if err := withoutTokens.ReconcileKeys(ctx); err != nil {
+		t.Fatalf("ReconcileKeys() error = %v", err)
+	}
+	if ttl := server.TTL(original.key("hashes")); ttl != 0 {
+		t.Fatalf("active hashes TTL = %v, want no TTL", ttl)
+	}
+	if ttl := server.TTL(original.key("tokens")); ttl != redisRemovedStoreTTL {
+		t.Fatalf("removed tokens TTL = %v, want %v", ttl, redisRemovedStoreTTL)
+	}
+
+	server.FastForward(24 * time.Hour)
+	if err := withoutTokens.ReconcileKeys(ctx); err != nil {
+		t.Fatalf("second ReconcileKeys() error = %v", err)
+	}
+	if ttl := server.TTL(original.key("tokens")); ttl != redisRemovedStoreTTL-24*time.Hour {
+		t.Fatalf("removed tokens TTL was extended to %v", ttl)
+	}
+
+	restored := newTestRedisStore(t, client, scope,
+		StoreConfig{Name: "hashes", Capacity: 2},
+		StoreConfig{Name: "tokens", Capacity: 2},
+	)
+	if err := restored.ReconcileKeys(ctx); err != nil {
+		t.Fatalf("restored ReconcileKeys() error = %v", err)
+	}
+	if ttl := server.TTL(original.key("tokens")); ttl != 0 {
+		t.Fatalf("restored tokens TTL = %v, want no TTL", ttl)
+	}
+	values, err := server.List(original.key("tokens"))
+	if err != nil {
+		t.Fatalf("read restored tokens: %v", err)
+	}
+	if len(values) != 1 || values[0] != "token" {
+		t.Fatalf("restored tokens = %v, want [token]", values)
+	}
+}
+
 func TestRedisStoreReportsEmptyUnknownAndInvalidValues(t *testing.T) {
 	t.Parallel()
 
 	_, client := newTestRedis(t)
-	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load"},
+	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"},
 		StoreConfig{Name: "hashes", Capacity: 1},
 	)
 
@@ -103,7 +162,7 @@ func TestRedisStoreHonoursCancellationAndReportsRedisErrors(t *testing.T) {
 	t.Parallel()
 
 	server, client := newTestRedis(t)
-	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load"},
+	store := newTestRedisStore(t, client, RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"},
 		StoreConfig{Name: "hashes", Capacity: 1},
 	)
 
@@ -123,13 +182,16 @@ func TestRedisStoreHonoursCancellationAndReportsRedisErrors(t *testing.T) {
 	if _, _, err := store.Random(context.Background(), "hashes"); err == nil {
 		t.Fatal("Random() after Redis shutdown error = nil")
 	}
+	if err := store.ReconcileKeys(context.Background()); err == nil {
+		t.Fatal("ReconcileKeys() after Redis shutdown error = nil")
+	}
 }
 
 func TestNewRedisStoreValidatesConfiguration(t *testing.T) {
 	t.Parallel()
 
 	_, client := newTestRedis(t)
-	validScope := RedisStoreScope{Namespace: "shorturl", Scenario: "load"}
+	validScope := RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	tests := []struct {
 		name    string
 		client  redis.UniversalClient
@@ -137,10 +199,12 @@ func TestNewRedisStoreValidatesConfiguration(t *testing.T) {
 		configs []StoreConfig
 	}{
 		{name: "nil client", scope: validScope},
-		{name: "empty namespace", client: client, scope: RedisStoreScope{Scenario: "load"}},
-		{name: "empty scenario", client: client, scope: RedisStoreScope{Namespace: "shorturl"}},
-		{name: "namespace colon", client: client, scope: RedisStoreScope{Namespace: "short:url", Scenario: "load"}},
-		{name: "scenario colon", client: client, scope: RedisStoreScope{Namespace: "shorturl", Scenario: "lo:ad"}},
+		{name: "empty namespace", client: client, scope: RedisStoreScope{Scenario: "load", UID: "scenario-uid"}},
+		{name: "empty scenario", client: client, scope: RedisStoreScope{Namespace: "shorturl", UID: "scenario-uid"}},
+		{name: "empty UID", client: client, scope: RedisStoreScope{Namespace: "shorturl", Scenario: "load"}},
+		{name: "namespace colon", client: client, scope: RedisStoreScope{Namespace: "short:url", Scenario: "load", UID: "scenario-uid"}},
+		{name: "scenario colon", client: client, scope: RedisStoreScope{Namespace: "shorturl", Scenario: "lo:ad", UID: "scenario-uid"}},
+		{name: "UID colon", client: client, scope: RedisStoreScope{Namespace: "shorturl", Scenario: "load", UID: "scenario:uid"}},
 		{name: "invalid store name", client: client, scope: validScope, configs: []StoreConfig{{Name: "Hashes", Capacity: 1}}},
 		{name: "invalid capacity", client: client, scope: validScope, configs: []StoreConfig{{Name: "hashes"}}},
 		{name: "duplicate store", client: client, scope: validScope, configs: []StoreConfig{{Name: "hashes", Capacity: 1}, {Name: "hashes", Capacity: 1}}},

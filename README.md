@@ -97,7 +97,7 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 - Kept `MemoryStore` as the default backend and added a Redis implementation
   of the existing context-aware `ValueStore` interface.
-- Isolated Redis keys by namespace, scenario and store name.
+- Isolated Redis keys by namespace, scenario UID and store name.
 - Preserved bounded-capacity semantics, FIFO eviction and random value
   selection with atomic Redis operations.
 - Deployed Redis through `shorturl-gitops` as a single-replica StatefulSet
@@ -106,6 +106,13 @@ turning it into an in-house replacement for a complete load-testing platform.
   restarts.
 - Made Redis value pools shareable by runner replicas while keeping memory
   pools local to a single runner.
+- Give stores removed from a Redis-backed scenario a non-renewing seven-day
+  TTL. Restoring the store before expiry removes its TTL and reuses the
+  captured values; active and suspended stores remain persistent.
+- Isolate Redis stores, distributed rate limits and uniform schedules by the
+  immutable `TrafficScenario` UID. A controller finalizer stops the runner and
+  removes only that UID's keys when the custom resource is deleted; suspending
+  and resuming a scenario preserves its data.
 - Exported store operation counts, results and latency from the runner and
   exposed its Prometheus endpoint through the generated Deployment.
 - Added a provisioned Kurama store dashboard to `shorturl-gitops` and verified
