@@ -170,9 +170,18 @@ type TrafficScenarioSpec struct {
 type TrafficScenarioPhase string
 
 const (
-	PhaseReady     TrafficScenarioPhase = "Ready"
-	PhaseSuspended TrafficScenarioPhase = "Suspended"
-	PhaseFailed    TrafficScenarioPhase = "Failed"
+	PhaseProgressing TrafficScenarioPhase = "Progressing"
+	PhaseReady       TrafficScenarioPhase = "Ready"
+	PhaseDegraded    TrafficScenarioPhase = "Degraded"
+	PhaseSuspended   TrafficScenarioPhase = "Suspended"
+	PhaseFailed      TrafficScenarioPhase = "Failed"
+)
+
+const (
+	ConditionReady       = "Ready"
+	ConditionProgressing = "Progressing"
+	ConditionDegraded    = "Degraded"
+	ConditionSuspended   = "Suspended"
 )
 
 // TrafficScenarioStatus is controller-owned observed state.
@@ -183,6 +192,11 @@ type TrafficScenarioStatus struct {
 	Message string `json:"message,omitempty"`
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Conditions describe the observed runner lifecycle and rollout state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

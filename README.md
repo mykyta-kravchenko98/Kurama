@@ -48,8 +48,9 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 ### Phase 1 — scenario lifecycle (complete)
 
-- Define the namespaced `TrafficScenario` CRD with Ready, Suspended and Failed
-  phases.
+- Define the namespaced `TrafficScenario` CRD with Progressing, Ready,
+  Degraded, Suspended and Failed phases plus generation-aware Kubernetes
+  Conditions.
 - Reconcile one labelled runner `Deployment` and a ConfigMap-backed
   `scenario.json`.
 - Roll out the runner when scenario configuration changes.
@@ -127,6 +128,9 @@ turning it into an in-house replacement for a complete load-testing platform.
   liveness and readiness probes for runner Deployments.
 - Kept existing runner replicas available during updates with an explicit
   zero-unavailable rolling strategy and bounded rollout history/deadline.
+- Derive TrafficScenario readiness from the generated Deployment status,
+  surface rollout failures as Degraded, and poll while a rollout or suspended
+  Deployment deletion is still progressing.
 - Kept uniform-random timing as the normal background traffic profile and
   added an explicit burst profile that preserves the selected mean RPM.
 - Reserved burst permits atomically with partial grants, so concurrent runner
