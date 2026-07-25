@@ -126,6 +126,9 @@ turning it into an in-house replacement for a complete load-testing platform.
   static values in dashboard JSON.
 - Added manager and runner health/readiness endpoints and generated startup,
   liveness and readiness probes for runner Deployments.
+- Keep runner liveness independent from Redis, while Redis-dependent runners
+  report not ready when a bounded Redis connectivity check fails and recover
+  readiness without a Pod restart when Redis returns.
 - Kept existing runner replicas available during updates with an explicit
   zero-unavailable rolling strategy and bounded rollout history/deadline.
 - Derive TrafficScenario readiness from the generated Deployment status,

@@ -74,7 +74,7 @@ func runWithMetricsAddress(
 	if err != nil {
 		return err
 	}
-	metrics, err := startMetricsServer(metricsAddress, registry)
+	metrics, err := startMetricsServer(metricsAddress, registry, state)
 	if err != nil {
 		return fmt.Errorf("start metrics server: %w", err)
 	}
