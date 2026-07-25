@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	scenarioConfigPath     = "/etc/kurama/scenario.json"
-	metricsShutdownTimeout = 5 * time.Second
+	scenarioConfigPath            = "/etc/kurama/scenario.json"
+	metricsShutdownTimeout        = 5 * time.Second
+	storeMaintenanceCheckInterval = 10 * time.Minute
 )
 
 func main() {
@@ -97,7 +98,31 @@ func runWithMetricsAddress(
 		"operations", len(config.Operations),
 		"stores", len(config.Stores),
 	)
+	maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		maintainStores(maintenanceCtx, state)
+	}()
 	scheduler.Run(ctx)
+	stopMaintenance()
+	<-maintenanceDone
 	slog.Info("Kurama runner stopping")
 	return nil
+}
+
+func maintainStores(ctx context.Context, state *runtimeState) {
+	ticker := time.NewTicker(storeMaintenanceCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := state.Maintain(ctx); err != nil {
+				slog.Warn("Kurama Redis store maintenance failed", "error", err)
+			}
+		}
+	}
 }

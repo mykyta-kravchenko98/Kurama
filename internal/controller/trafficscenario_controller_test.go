@@ -536,7 +536,7 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	ctx := context.Background()
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
-		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid")},
 		Spec:       validScenarioSpec(),
 	}
 	scenario.Spec.Replicas = 2
@@ -569,6 +569,9 @@ func TestReconcileCreatesReplicatedRunnerWithRedisLimiterAndMemoryStore(t *testi
 	if got := envValue(environment, runner.RedisAddressEnv); got != "kurama-redis:6379" {
 		t.Fatalf("runner Redis address = %q", got)
 	}
+	if got := envValue(environment, runner.ScenarioUIDEnv); got != "scenario-uid" {
+		t.Fatalf("runner scenario UID = %q", got)
+	}
 
 	var configMap corev1.ConfigMap
 	if err := client.Get(ctx, key, &configMap); err != nil {
@@ -595,7 +598,7 @@ func TestReconcileCreatesRedisRunnerEnvironment(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
-		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid")},
 		Spec:       validScenarioSpec(),
 	}
 	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: trafficv1alpha1.StorageTypeRedis}
@@ -626,6 +629,9 @@ func TestReconcileCreatesRedisRunnerEnvironment(t *testing.T) {
 	if got := envValue(environment, runner.ScenarioEnv); got != "shorturl" {
 		t.Fatalf("runner scenario = %q", got)
 	}
+	if got := envValue(environment, runner.ScenarioUIDEnv); got != "scenario-uid" {
+		t.Fatalf("runner scenario UID = %q", got)
+	}
 	namespace := envVar(environment, runner.NamespaceEnv)
 	if namespace == nil || namespace.ValueFrom == nil || namespace.ValueFrom.FieldRef == nil || namespace.ValueFrom.FieldRef.FieldPath != "metadata.namespace" {
 		t.Fatalf("runner namespace env = %#v", namespace)
@@ -637,7 +643,7 @@ func TestReconcileRejectsRedisWithoutControllerAddress(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
-		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid")},
 		Spec:       validScenarioSpec(),
 	}
 	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: trafficv1alpha1.StorageTypeRedis}
@@ -661,7 +667,7 @@ func TestReconcileRejectsRedisLimiterWithoutControllerAddress(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
-		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid")},
 		Spec:       validScenarioSpec(),
 	}
 	scenario.Spec.Rate.Limiter = &trafficv1alpha1.RateLimiterSpec{Type: trafficv1alpha1.RateLimiterTypeRedis}
@@ -685,7 +691,7 @@ func TestReconcileRejectsUniformScheduleWithoutControllerAddress(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	scenario := &trafficv1alpha1.TrafficScenario{
-		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
+		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid")},
 		Spec:       validScenarioSpec(),
 	}
 	scenario.Spec.Rate.Schedule = trafficv1alpha1.RateScheduleSpec{

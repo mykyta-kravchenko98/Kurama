@@ -139,5 +139,6 @@ func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress s
 			}},
 		},
 		corev1.EnvVar{Name: runner.ScenarioEnv, Value: scenario.Name},
+		corev1.EnvVar{Name: runner.ScenarioUIDEnv, Value: string(scenario.UID)},
 	)
 }

@@ -23,6 +23,7 @@ var selectUniformWindowScript = redis.NewScript(selectUniformWindowLua)
 type RedisUniformScope struct {
 	Namespace string
 	Scenario  string
+	UID       string
 }
 
 // RedisUniformConfig defines the inclusive RPM range and window duration.
@@ -93,6 +94,7 @@ func newRedisUniform(
 			redisUniformKeyPrefix,
 			scope.Namespace,
 			scope.Scenario,
+			scope.UID,
 			strconv.Itoa(config.MinRequestsPerMinute),
 			strconv.Itoa(config.MaxRequestsPerMinute),
 			strconv.FormatInt(config.Window.Microseconds(), 10),
@@ -129,11 +131,17 @@ func validateRedisUniformScope(scope RedisUniformScope) error {
 	if scope.Scenario == "" {
 		return fmt.Errorf("redis schedule scenario must not be empty")
 	}
+	if scope.UID == "" {
+		return fmt.Errorf("redis schedule UID must not be empty")
+	}
 	if strings.Contains(scope.Namespace, ":") {
 		return fmt.Errorf("redis schedule namespace must not contain colon")
 	}
 	if strings.Contains(scope.Scenario, ":") {
 		return fmt.Errorf("redis schedule scenario must not contain colon")
+	}
+	if strings.Contains(scope.UID, ":") {
+		return fmt.Errorf("redis schedule UID must not contain colon")
 	}
 	return nil
 }

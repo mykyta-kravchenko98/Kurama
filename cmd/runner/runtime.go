@@ -19,6 +19,7 @@ type storeSettings struct {
 	RedisAddress string
 	Namespace    string
 	Scenario     string
+	ScenarioUID  string
 }
 
 type runtimeState struct {
@@ -26,6 +27,7 @@ type runtimeState struct {
 	Limiter  ratelimit.Limiter
 	Schedule rateschedule.Schedule
 	redis    redis.UniversalClient
+	maintain func(context.Context) error
 	close    func() error
 }
 
@@ -43,12 +45,20 @@ func (s *runtimeState) Ready(ctx context.Context) error {
 	return nil
 }
 
+func (s *runtimeState) Maintain(ctx context.Context) error {
+	if s.maintain == nil {
+		return nil
+	}
+	return s.maintain(ctx)
+}
+
 func storeSettingsFromEnv() storeSettings {
 	return storeSettings{
 		Backend:      os.Getenv(runner.StoreBackendEnv),
 		RedisAddress: os.Getenv(runner.RedisAddressEnv),
 		Namespace:    os.Getenv(runner.NamespaceEnv),
 		Scenario:     os.Getenv(runner.ScenarioEnv),
+		ScenarioUID:  os.Getenv(runner.ScenarioUIDEnv),
 	}
 }
 
@@ -79,7 +89,10 @@ func newRuntimeState(
 		if settings.Scenario == "" {
 			return nil, fmt.Errorf("%s must be set when Redis is used", runner.ScenarioEnv)
 		}
-		client = newRedisClient(settings.RedisAddress)
+		if settings.ScenarioUID == "" {
+			return nil, fmt.Errorf("%s must be set when Redis is used", runner.ScenarioUIDEnv)
+		}
+		client = runner.NewRedisClient(settings.RedisAddress)
 		if err := client.Ping(ctx).Err(); err != nil {
 			closeErr := client.Close()
 			return nil, errors.Join(fmt.Errorf("ping Redis: %w", err), closeErr)
@@ -88,20 +101,35 @@ func newRuntimeState(
 	}
 
 	var store runner.ValueStore
+	var maintain func(context.Context) error
 	var err error
 	switch storeBackend {
 	case "memory":
 		store, err = runner.NewMemoryStore(configs)
 	case "redis":
-		store, err = runner.NewRedisStore(client, runner.RedisStoreScope{
+		var redisStore *runner.RedisStore
+		redisStore, err = runner.NewRedisStore(client, runner.RedisStoreScope{
 			Namespace: settings.Namespace,
 			Scenario:  settings.Scenario,
+			UID:       settings.ScenarioUID,
 		}, configs)
+		if err == nil {
+			store = redisStore
+			maintain = redisStore.ReconcileKeys
+		}
 	}
 	if err != nil {
 		return nil, errors.Join(err, closeState())
 	}
-	return newRuntimeStateWithComponents(store, client, closeState, settings, limiterBackend, scheduleConfig)
+	state, err := newRuntimeStateWithComponents(store, client, closeState, settings, limiterBackend, scheduleConfig)
+	if err != nil {
+		return nil, err
+	}
+	state.maintain = maintain
+	if err := state.Maintain(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("initialize Redis store retention: %w", err), state.Close())
+	}
+	return state, nil
 }
 
 func newRuntimeStateWithComponents(
@@ -120,6 +148,7 @@ func newRuntimeStateWithComponents(
 		redisLimiter, err := ratelimit.NewRedisRateLimiter(client, ratelimit.RedisRateLimiterScope{
 			Namespace: settings.Namespace,
 			Scenario:  settings.Scenario,
+			UID:       settings.ScenarioUID,
 		})
 		if err != nil {
 			return nil, errors.Join(err, closeState())
@@ -134,7 +163,11 @@ func newRuntimeStateWithComponents(
 	case "uniform":
 		redisSchedule, err := rateschedule.NewRedisUniform(
 			client,
-			rateschedule.RedisUniformScope{Namespace: settings.Namespace, Scenario: settings.Scenario},
+			rateschedule.RedisUniformScope{
+				Namespace: settings.Namespace,
+				Scenario:  settings.Scenario,
+				UID:       settings.ScenarioUID,
+			},
 			rateschedule.RedisUniformConfig{
 				MinRequestsPerMinute: scheduleConfig.MinRequestsPerMinute,
 				MaxRequestsPerMinute: scheduleConfig.MaxRequestsPerMinute,

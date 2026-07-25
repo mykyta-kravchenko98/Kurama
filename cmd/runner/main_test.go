@@ -114,6 +114,7 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
+		ScenarioUID:  "scenario-uid",
 	}, "redis", fixedScheduleConfig(45), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
@@ -126,7 +127,7 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 	if err := state.Put(context.Background(), "hashes", "redis-value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	values, err := server.List("kurama:v1:shorturl:load:hashes")
+	values, err := server.List("kurama:v1:shorturl:load:scenario-uid:hashes")
 	if err != nil {
 		t.Fatalf("read Redis list: %v", err)
 	}
@@ -139,6 +140,37 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 	assertLimiterAllowsOneRequest(t, state.Limiter)
 }
 
+func TestNewRuntimeStateInitializesRemovedRedisStoreTTL(t *testing.T) {
+	t.Parallel()
+
+	server := miniredis.RunT(t)
+	removedKey := "kurama:v1:shorturl:load:scenario-uid:tokens"
+	if _, err := server.Push(removedKey, "token"); err != nil {
+		t.Fatalf("create removed Redis store: %v", err)
+	}
+
+	state, err := newRuntimeState(context.Background(), storeSettings{
+		Backend:      "redis",
+		RedisAddress: server.Addr(),
+		Namespace:    "shorturl",
+		Scenario:     "load",
+		ScenarioUID:  "scenario-uid",
+	}, "redis", fixedScheduleConfig(45), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newRuntimeState() error = %v", err)
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	const removedStoreTTL = 7 * 24 * time.Hour
+	if ttl := server.TTL(removedKey); ttl != removedStoreTTL {
+		t.Fatalf("removed Redis store TTL = %v, want %v", ttl, removedStoreTTL)
+	}
+}
+
 func TestNewRuntimeStateSupportsMemoryStoreWithRedisLimiter(t *testing.T) {
 	t.Parallel()
 	server := miniredis.RunT(t)
@@ -146,6 +178,7 @@ func TestNewRuntimeStateSupportsMemoryStoreWithRedisLimiter(t *testing.T) {
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
+		ScenarioUID:  "scenario-uid",
 	}, "redis", fixedScheduleConfig(45), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
@@ -170,6 +203,7 @@ func TestNewRuntimeStateSupportsRedisUniformScheduleWithMemoryStore(t *testing.T
 		RedisAddress: server.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
+		ScenarioUID:  "scenario-uid",
 	}, "local", runner.RateScheduleConfig{
 		Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1,
 	}, []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
@@ -250,9 +284,10 @@ func TestNewRuntimeStateRejectsInvalidBackendSettings(t *testing.T) {
 	}{
 		{name: "unknown storage backend", settings: storeSettings{Backend: "postgres"}, limiterBackend: "local", schedule: fixedScheduleConfig(30)},
 		{name: "unknown limiter backend", limiterBackend: "postgres", schedule: fixedScheduleConfig(30)},
-		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
-		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
-		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing Redis address", settings: storeSettings{Backend: "redis", Namespace: "shorturl", Scenario: "load", ScenarioUID: "scenario-uid"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing namespace", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Scenario: "load", ScenarioUID: "scenario-uid"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing scenario", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl", ScenarioUID: "scenario-uid"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
+		{name: "missing scenario UID", settings: storeSettings{Backend: "redis", RedisAddress: "redis:6379", Namespace: "shorturl", Scenario: "load"}, limiterBackend: "redis", schedule: fixedScheduleConfig(30)},
 		{name: "uniform schedule missing Redis address", limiterBackend: "local", schedule: runner.RateScheduleConfig{Type: "uniform", MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, WindowMinutes: 1}},
 		{name: "unknown schedule", limiterBackend: "local", schedule: runner.RateScheduleConfig{Type: "burst"}},
 	}
@@ -372,6 +407,7 @@ func TestMetricsServerReadinessTracksRedis(t *testing.T) {
 		RedisAddress: redisServer.Addr(),
 		Namespace:    "shorturl",
 		Scenario:     "load",
+		ScenarioUID:  "scenario-uid",
 	}, "redis", fixedScheduleConfig(30), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
 	if err != nil {
 		t.Fatalf("newRuntimeState() error = %v", err)
@@ -413,7 +449,7 @@ func TestMetricsServerReadinessTracksRedis(t *testing.T) {
 func TestNewRedisClientUsesBoundedTimeoutsAndRetries(t *testing.T) {
 	t.Parallel()
 
-	client := newRedisClient("redis:6379")
+	client := runner.NewRedisClient("redis:6379")
 	defer func() {
 		if err := client.Close(); err != nil {
 			t.Errorf("Close() error = %v", err)
@@ -421,26 +457,32 @@ func TestNewRedisClientUsesBoundedTimeoutsAndRetries(t *testing.T) {
 	}()
 
 	options := client.Options()
-	if options.DialTimeout != redisDialTimeout ||
-		options.ReadTimeout != redisReadTimeout ||
-		options.WriteTimeout != redisWriteTimeout {
+	const (
+		wantDialTimeout  = 3 * time.Second
+		wantReadTimeout  = 2 * time.Second
+		wantWriteTimeout = 2 * time.Second
+		wantMaxRetries   = 2
+	)
+	if options.DialTimeout != wantDialTimeout ||
+		options.ReadTimeout != wantReadTimeout ||
+		options.WriteTimeout != wantWriteTimeout {
 		t.Fatalf(
 			"Redis timeouts = (%v, %v, %v), want (%v, %v, %v)",
 			options.DialTimeout,
 			options.ReadTimeout,
 			options.WriteTimeout,
-			redisDialTimeout,
-			redisReadTimeout,
-			redisWriteTimeout,
+			wantDialTimeout,
+			wantReadTimeout,
+			wantWriteTimeout,
 		)
 	}
-	if options.MaxRetries != redisMaxRetries || options.DialerRetries != redisMaxRetries {
+	if options.MaxRetries != wantMaxRetries || options.DialerRetries != wantMaxRetries {
 		t.Fatalf(
 			"Redis retries = (%d, %d), want (%d, %d)",
 			options.MaxRetries,
 			options.DialerRetries,
-			redisMaxRetries,
-			redisMaxRetries,
+			wantMaxRetries,
+			wantMaxRetries,
 		)
 	}
 	if !options.ContextTimeoutEnabled {

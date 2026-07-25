@@ -1,4 +1,4 @@
-package main
+package runner
 
 import (
 	"time"
@@ -13,7 +13,9 @@ const (
 	redisMaxRetries   = 2
 )
 
-func newRedisClient(address string) *redis.Client {
+// NewRedisClient applies Kurama's bounded connection, operation and retry
+// policy consistently to manager cleanup and runner runtime clients.
+func NewRedisClient(address string) *redis.Client {
 	return redis.NewClient(&redis.Options{
 		Addr:                  address,
 		DialTimeout:           redisDialTimeout,

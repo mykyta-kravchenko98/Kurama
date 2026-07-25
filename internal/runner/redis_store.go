@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const redisStoreKeyPrefix = "kurama:v1"
+const (
+	redisStoreKeyPrefix    = "kurama:v1"
+	redisRemovedStoreTTL   = 7 * 24 * time.Hour
+	redisStoreScanPageSize = 100
+)
 
 // RedisStoreScope isolates values belonging to one TrafficScenario. Kubernetes
 // metadata is supplied by the runner wiring rather than repeated in every
@@ -17,6 +22,7 @@ const redisStoreKeyPrefix = "kurama:v1"
 type RedisStoreScope struct {
 	Namespace string
 	Scenario  string
+	UID       string
 }
 
 // RedisStore keeps bounded value pools in Redis so runner replicas can share
@@ -53,7 +59,7 @@ func NewRedisStore(client redis.UniversalClient, scope RedisStoreScope, configs 
 
 	return &RedisStore{
 		client:    client,
-		keyPrefix: strings.Join([]string{redisStoreKeyPrefix, scope.Namespace, scope.Scenario}, ":"),
+		keyPrefix: strings.Join([]string{redisStoreKeyPrefix, scope.Namespace, scope.Scenario, scope.UID}, ":"),
 		limits:    limits,
 	}, nil
 }
@@ -108,6 +114,47 @@ func (s *RedisStore) Random(ctx context.Context, store string) (string, bool, er
 	return value, true, nil
 }
 
+// ReconcileKeys keeps active store keys persistent and gives removed stores a
+// seven-day rollback window. ExpireNX prevents repeated reconciliation from
+// extending that window, while Persist restores a store removed by mistake.
+func (s *RedisStore) ReconcileKeys(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	keys := make([]string, 0, len(s.limits))
+	iterator := s.client.Scan(ctx, 0, s.keyPrefix+":*", redisStoreScanPageSize).Iterator()
+	for iterator.Next(ctx) {
+		key := iterator.Val()
+		store := strings.TrimPrefix(key, s.keyPrefix+":")
+		if strings.Contains(store, ":") || validateName(store) != nil {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if err := iterator.Err(); err != nil {
+		return fmt.Errorf("scan Redis store keys: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	if _, err := s.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, key := range keys {
+			store := strings.TrimPrefix(key, s.keyPrefix+":")
+			if _, active := s.limits[store]; active {
+				pipe.Persist(ctx, key)
+				continue
+			}
+			pipe.ExpireNX(ctx, key, redisRemovedStoreTTL)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("reconcile Redis store keys: %w", err)
+	}
+	return nil
+}
+
 func (s *RedisStore) key(store string) string {
 	return s.keyPrefix + ":" + store
 }
@@ -119,11 +166,17 @@ func validateRedisScope(scope RedisStoreScope) error {
 	if scope.Scenario == "" {
 		return fmt.Errorf("redis scope scenario must not be empty")
 	}
+	if scope.UID == "" {
+		return fmt.Errorf("redis scope UID must not be empty")
+	}
 	if strings.Contains(scope.Namespace, ":") {
 		return fmt.Errorf("redis scope namespace must not contain colon")
 	}
 	if strings.Contains(scope.Scenario, ":") {
 		return fmt.Errorf("redis scope scenario must not contain colon")
+	}
+	if strings.Contains(scope.UID, ":") {
+		return fmt.Errorf("redis scope UID must not contain colon")
 	}
 	return nil
 }

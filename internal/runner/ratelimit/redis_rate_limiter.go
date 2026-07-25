@@ -22,6 +22,7 @@ var acquireRateLimitScript = redis.NewScript(acquireRateLimitLua)
 type RedisRateLimiterScope struct {
 	Namespace string
 	Scenario  string
+	UID       string
 }
 
 // RedisRateLimiter atomically shares one fixed-window request budget between
@@ -38,7 +39,7 @@ func NewRedisRateLimiter(client redis.UniversalClient, scope RedisRateLimiterSco
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	if err := validateRedisScope(scope.Namespace, scope.Scenario); err != nil {
+	if err := validateRedisScope(scope.Namespace, scope.Scenario, scope.UID); err != nil {
 		return nil, err
 	}
 	return &RedisRateLimiter{
@@ -47,22 +48,29 @@ func NewRedisRateLimiter(client redis.UniversalClient, scope RedisRateLimiterSco
 			redisRateLimiterKeyPrefix,
 			scope.Namespace,
 			scope.Scenario,
+			scope.UID,
 		}, ":"),
 	}, nil
 }
 
-func validateRedisScope(namespace, scenario string) error {
+func validateRedisScope(namespace, scenario, uid string) error {
 	if namespace == "" {
 		return fmt.Errorf("redis scope namespace must not be empty")
 	}
 	if scenario == "" {
 		return fmt.Errorf("redis scope scenario must not be empty")
 	}
+	if uid == "" {
+		return fmt.Errorf("redis scope UID must not be empty")
+	}
 	if strings.Contains(namespace, ":") {
 		return fmt.Errorf("redis scope namespace must not contain colon")
 	}
 	if strings.Contains(scenario, ":") {
 		return fmt.Errorf("redis scope scenario must not contain colon")
+	}
+	if strings.Contains(uid, ":") {
+		return fmt.Errorf("redis scope UID must not contain colon")
 	}
 	return nil
 }

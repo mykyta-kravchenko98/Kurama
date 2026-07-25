@@ -23,7 +23,7 @@ func TestRedisUniformSharesFirstProposalAndChangesAtNextWindow(t *testing.T) {
 		}
 	})
 
-	scope := RedisUniformScope{Namespace: "shorturl", Scenario: "load"}
+	scope := RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	config := RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, Window: time.Minute}
 	first := newTestRedisUniform(t, firstClient, scope, config, fixedIntegerRandomSource{value: 0})
 	second := newTestRedisUniform(t, secondClient, scope, config, fixedIntegerRandomSource{value: 54})
@@ -61,7 +61,7 @@ func TestRedisUniformSelectsOneProposalConcurrently(t *testing.T) {
 		}
 	})
 
-	scope := RedisUniformScope{Namespace: "shorturl", Scenario: "load"}
+	scope := RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	config := RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, Window: time.Minute}
 	schedules := []*RedisUniform{
 		newTestRedisUniform(t, firstClient, scope, config, fixedIntegerRandomSource{value: 0}),
@@ -98,10 +98,10 @@ func TestRedisUniformKeepsScopesIndependent(t *testing.T) {
 	_, client := newTestRedis(t)
 	config := RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, Window: time.Minute}
 	first := newTestRedisUniform(t, client,
-		RedisUniformScope{Namespace: "shorturl", Scenario: "first"},
+		RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "first-uid"},
 		config, fixedIntegerRandomSource{value: 0})
 	second := newTestRedisUniform(t, client,
-		RedisUniformScope{Namespace: "shorturl", Scenario: "second"},
+		RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "second-uid"},
 		config, fixedIntegerRandomSource{value: 54})
 
 	firstRPM, err := first.RequestsPerMinute(context.Background())
@@ -121,7 +121,7 @@ func TestRedisUniformReportsCancellationAndRedisErrors(t *testing.T) {
 	t.Parallel()
 	server, client := newTestRedis(t)
 	schedule := newTestRedisUniform(t, client,
-		RedisUniformScope{Namespace: "shorturl", Scenario: "load"},
+		RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"},
 		RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, Window: time.Minute},
 		fixedIntegerRandomSource{value: 0})
 
@@ -139,7 +139,7 @@ func TestRedisUniformReportsCancellationAndRedisErrors(t *testing.T) {
 func TestNewRedisUniformValidatesConfiguration(t *testing.T) {
 	t.Parallel()
 	_, client := newTestRedis(t)
-	validScope := RedisUniformScope{Namespace: "shorturl", Scenario: "load"}
+	validScope := RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
 	validConfig := RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56, Window: time.Minute}
 	tests := []struct {
 		name   string
@@ -149,10 +149,12 @@ func TestNewRedisUniformValidatesConfiguration(t *testing.T) {
 		random integerRandomSource
 	}{
 		{name: "nil client", scope: validScope, config: validConfig, random: fixedIntegerRandomSource{}},
-		{name: "empty namespace", client: client, scope: RedisUniformScope{Scenario: "load"}, config: validConfig, random: fixedIntegerRandomSource{}},
-		{name: "empty scenario", client: client, scope: RedisUniformScope{Namespace: "shorturl"}, config: validConfig, random: fixedIntegerRandomSource{}},
-		{name: "namespace colon", client: client, scope: RedisUniformScope{Namespace: "short:url", Scenario: "load"}, config: validConfig, random: fixedIntegerRandomSource{}},
-		{name: "scenario colon", client: client, scope: RedisUniformScope{Namespace: "shorturl", Scenario: "lo:ad"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "empty namespace", client: client, scope: RedisUniformScope{Scenario: "load", UID: "scenario-uid"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "empty scenario", client: client, scope: RedisUniformScope{Namespace: "shorturl", UID: "scenario-uid"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "empty UID", client: client, scope: RedisUniformScope{Namespace: "shorturl", Scenario: "load"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "namespace colon", client: client, scope: RedisUniformScope{Namespace: "short:url", Scenario: "load", UID: "scenario-uid"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "scenario colon", client: client, scope: RedisUniformScope{Namespace: "shorturl", Scenario: "lo:ad", UID: "scenario-uid"}, config: validConfig, random: fixedIntegerRandomSource{}},
+		{name: "UID colon", client: client, scope: RedisUniformScope{Namespace: "shorturl", Scenario: "load", UID: "scenario:uid"}, config: validConfig, random: fixedIntegerRandomSource{}},
 		{name: "zero minimum", client: client, scope: validScope, config: RedisUniformConfig{MaxRequestsPerMinute: 56, Window: time.Minute}, random: fixedIntegerRandomSource{}},
 		{name: "maximum below minimum", client: client, scope: validScope, config: RedisUniformConfig{MinRequestsPerMinute: 56, MaxRequestsPerMinute: 2, Window: time.Minute}, random: fixedIntegerRandomSource{}},
 		{name: "zero window", client: client, scope: validScope, config: RedisUniformConfig{MinRequestsPerMinute: 2, MaxRequestsPerMinute: 56}, random: fixedIntegerRandomSource{}},

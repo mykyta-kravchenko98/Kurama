@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/redis/go-redis/v9"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,6 +62,15 @@ func main() {
 	}
 	runnerImagePullSecret := os.Getenv("KURAMA_RUNNER_IMAGE_PULL_SECRET")
 	redisAddress := os.Getenv(runner.RedisAddressEnv)
+	var redisClient *redis.Client
+	if redisAddress != "" {
+		redisClient = runner.NewRedisClient(redisAddress)
+		defer func() {
+			if err := redisClient.Close(); err != nil {
+				logger.Error(err, "unable to close Redis client")
+			}
+		}()
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -79,6 +90,7 @@ func main() {
 		RunnerImage:           runnerImage,
 		RunnerImagePullSecret: runnerImagePullSecret,
 		RedisAddress:          redisAddress,
+		RedisClient:           redisClient,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to set up TrafficScenario controller")

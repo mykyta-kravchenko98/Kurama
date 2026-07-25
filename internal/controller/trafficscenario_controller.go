@@ -12,6 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	"github.com/redis/go-redis/v9"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 	"github.com/mykyta-kravchenko98/Kurama/internal/runner"
@@ -26,9 +29,10 @@ type TrafficScenarioReconciler struct {
 	RunnerImage           string
 	RunnerImagePullSecret string
 	RedisAddress          string
+	RedisClient           redis.UniversalClient
 }
 
-// +kubebuilder:rbac:groups=traffic.kurama.dev,resources=trafficscenarios,verbs=get;list;watch
+// +kubebuilder:rbac:groups=traffic.kurama.dev,resources=trafficscenarios,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=traffic.kurama.dev,resources=trafficscenarios/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -37,6 +41,16 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var scenario trafficv1alpha1.TrafficScenario
 	if err := r.Get(ctx, req.NamespacedName, &scenario); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !scenario.DeletionTimestamp.IsZero() {
+		return r.reconcileDeletion(ctx, &scenario)
+	}
+	if requiresRedis(&scenario) && r.RedisClient != nil &&
+		!controllerutil.ContainsFinalizer(&scenario, redisCleanupFinalizer) {
+		controllerutil.AddFinalizer(&scenario, redisCleanupFinalizer)
+		if err := r.Update(ctx, &scenario); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add Redis cleanup finalizer: %w", err)
+		}
 	}
 
 	name := runnerName(scenario.Name)
