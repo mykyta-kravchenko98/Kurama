@@ -25,11 +25,22 @@ type runtimeState struct {
 	runner.ValueStore
 	Limiter  ratelimit.Limiter
 	Schedule rateschedule.Schedule
+	redis    redis.UniversalClient
 	close    func() error
 }
 
 func (s *runtimeState) Close() error {
 	return s.close()
+}
+
+func (s *runtimeState) Ready(ctx context.Context) error {
+	if s.redis == nil {
+		return nil
+	}
+	if err := s.redis.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("ping Redis: %w", err)
+	}
+	return nil
 }
 
 func storeSettingsFromEnv() storeSettings {
@@ -68,7 +79,7 @@ func newRuntimeState(
 		if settings.Scenario == "" {
 			return nil, fmt.Errorf("%s must be set when Redis is used", runner.ScenarioEnv)
 		}
-		client = redis.NewClient(&redis.Options{Addr: settings.RedisAddress})
+		client = newRedisClient(settings.RedisAddress)
 		if err := client.Ping(ctx).Err(); err != nil {
 			closeErr := client.Close()
 			return nil, errors.Join(fmt.Errorf("ping Redis: %w", err), closeErr)
@@ -137,7 +148,13 @@ func newRuntimeStateWithComponents(
 	default:
 		return nil, errors.Join(fmt.Errorf("rate schedule type %q is unsupported", scheduleConfig.Type), closeState())
 	}
-	return &runtimeState{ValueStore: store, Limiter: limiter, Schedule: schedule, close: closeState}, nil
+	return &runtimeState{
+		ValueStore: store,
+		Limiter:    limiter,
+		Schedule:   schedule,
+		redis:      client,
+		close:      closeState,
+	}, nil
 }
 
 func normalizedStoreBackend(backend string) string {

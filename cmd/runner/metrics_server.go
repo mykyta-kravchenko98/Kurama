@@ -20,7 +20,17 @@ type metricsServer struct {
 	done    <-chan error
 }
 
-func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsServer, error) {
+type readinessChecker interface {
+	Ready(context.Context) error
+}
+
+const readinessCheckTimeout = 750 * time.Millisecond
+
+func startMetricsServer(
+	address string,
+	gatherer prometheus.Gatherer,
+	readiness readinessChecker,
+) (*metricsServer, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("listen on %q: %w", address, err)
@@ -28,7 +38,7 @@ func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsS
 	mux := http.NewServeMux()
 	mux.Handle(runner.MetricsPath, promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	mux.HandleFunc(runner.HealthPath, healthy)
-	mux.HandleFunc(runner.ReadinessPath, healthy)
+	mux.HandleFunc(runner.ReadinessPath, ready(readiness))
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -42,6 +52,19 @@ func startMetricsServer(address string, gatherer prometheus.Gatherer) (*metricsS
 
 func healthy(writer http.ResponseWriter, _ *http.Request) {
 	writer.WriteHeader(http.StatusOK)
+}
+
+func ready(checker readinessChecker) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		ctx, cancel := context.WithTimeout(request.Context(), readinessCheckTimeout)
+		defer cancel()
+
+		if err := checker.Ready(ctx); err != nil {
+			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}
 }
 
 func (s *metricsServer) Shutdown(ctx context.Context) error {

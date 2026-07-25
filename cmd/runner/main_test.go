@@ -315,7 +315,7 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 		t.Fatalf("RequestsPerMinute() error = %v", err)
 	}
 
-	server, err := startMetricsServer("127.0.0.1:0", registry)
+	server, err := startMetricsServer("127.0.0.1:0", registry, state)
 	if err != nil {
 		t.Fatalf("startMetricsServer() error = %v", err)
 	}
@@ -360,6 +360,91 @@ func TestMetricsServerExportsRunnerMetricsAndShutsDown(t *testing.T) {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func TestMetricsServerReadinessTracksRedis(t *testing.T) {
+	t.Parallel()
+
+	redisServer := miniredis.RunT(t)
+	state, err := newRuntimeState(context.Background(), storeSettings{
+		Backend:      "redis",
+		RedisAddress: redisServer.Addr(),
+		Namespace:    "shorturl",
+		Scenario:     "load",
+	}, "redis", fixedScheduleConfig(30), []runner.StoreConfig{{Name: "hashes", Capacity: 1}})
+	if err != nil {
+		t.Fatalf("newRuntimeState() error = %v", err)
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	server, err := startMetricsServer("127.0.0.1:0", prometheus.NewRegistry(), state)
+	if err != nil {
+		t.Fatalf("startMetricsServer() error = %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("Shutdown() error = %v", err)
+		}
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	healthURL := "http://" + server.address + runner.HealthPath
+	readinessURL := "http://" + server.address + runner.ReadinessPath
+	assertHTTPStatus(t, client, healthURL, http.StatusOK)
+	assertHTTPStatus(t, client, readinessURL, http.StatusOK)
+
+	redisServer.Close()
+	assertHTTPStatus(t, client, healthURL, http.StatusOK)
+	assertHTTPStatus(t, client, readinessURL, http.StatusServiceUnavailable)
+
+	if err := redisServer.Restart(); err != nil {
+		t.Fatalf("restart Redis: %v", err)
+	}
+	assertHTTPStatus(t, client, readinessURL, http.StatusOK)
+}
+
+func TestNewRedisClientUsesBoundedTimeoutsAndRetries(t *testing.T) {
+	t.Parallel()
+
+	client := newRedisClient("redis:6379")
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	options := client.Options()
+	if options.DialTimeout != redisDialTimeout ||
+		options.ReadTimeout != redisReadTimeout ||
+		options.WriteTimeout != redisWriteTimeout {
+		t.Fatalf(
+			"Redis timeouts = (%v, %v, %v), want (%v, %v, %v)",
+			options.DialTimeout,
+			options.ReadTimeout,
+			options.WriteTimeout,
+			redisDialTimeout,
+			redisReadTimeout,
+			redisWriteTimeout,
+		)
+	}
+	if options.MaxRetries != redisMaxRetries || options.DialerRetries != redisMaxRetries {
+		t.Fatalf(
+			"Redis retries = (%d, %d), want (%d, %d)",
+			options.MaxRetries,
+			options.DialerRetries,
+			redisMaxRetries,
+			redisMaxRetries,
+		)
+	}
+	if !options.ContextTimeoutEnabled {
+		t.Fatal("Redis context timeouts are disabled")
 	}
 }
 
