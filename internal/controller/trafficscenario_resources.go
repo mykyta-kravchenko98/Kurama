@@ -25,8 +25,13 @@ const (
 func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *corev1.ConfigMap {
 	config := scenarioConfigJSON(scenario)
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels(scenario)},
-		Data:       map[string]string{scenarioConfigKey: config},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   scenario.Namespace,
+			Name:        name,
+			Labels:      labels(scenario),
+			Annotations: scenarioAnnotations(scenario),
+		},
+		Data: map[string]string{scenarioConfigKey: config},
 	}
 }
 
@@ -35,6 +40,15 @@ func desiredDeployment(
 	name, image, imagePullSecret, redisAddress string,
 ) *appsv1.Deployment {
 	labels := labels(scenario)
+	podAnnotations := map[string]string{
+		configHashAnnotation:   configHash(scenarioConfigJSON(scenario)),
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   fmt.Sprintf("%d", runner.MetricsPort),
+		"prometheus.io/path":   runner.MetricsPath,
+	}
+	for key, value := range scenarioAnnotations(scenario) {
+		podAnnotations[key] = value
+	}
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
 			Name:         "runner",
@@ -64,7 +78,12 @@ func desiredDeployment(
 		podSpec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: imagePullSecret}}
 	}
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Namespace: scenario.Namespace, Name: name, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   scenario.Namespace,
+			Name:        name,
+			Labels:      labels,
+			Annotations: scenarioAnnotations(scenario),
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas:                ptr.To(runnerReplicas(scenario)),
 			RevisionHistoryLimit:    ptr.To(runnerRevisionHistoryLimit),
@@ -79,13 +98,8 @@ func desiredDeployment(
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-					Annotations: map[string]string{
-						configHashAnnotation:   configHash(scenarioConfigJSON(scenario)),
-						"prometheus.io/scrape": "true",
-						"prometheus.io/port":   fmt.Sprintf("%d", runner.MetricsPort),
-						"prometheus.io/path":   runner.MetricsPath,
-					},
+					Labels:      labels,
+					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},
@@ -126,16 +140,4 @@ func runnerEnvironment(scenario *trafficv1alpha1.TrafficScenario, redisAddress s
 		},
 		corev1.EnvVar{Name: runner.ScenarioEnv, Value: scenario.Name},
 	)
-}
-
-func labels(scenario *trafficv1alpha1.TrafficScenario) map[string]string {
-	return map[string]string{componentLabel: "runner", scenarioLabel: scenario.Name}
-}
-
-func runnerName(scenarioName string) string {
-	const suffix = "-runner"
-	if len(scenarioName)+len(suffix) <= 63 {
-		return scenarioName + suffix
-	}
-	return scenarioName[:63-len(suffix)] + suffix
 }

@@ -40,6 +40,7 @@ func (r *TrafficScenarioReconciler) applyConfigMap(
 
 	before := existing.DeepCopy()
 	setManagedMapValues(&existing.Labels, desired.Labels)
+	setManagedMapValues(&existing.Annotations, desired.Annotations)
 	if existing.Data == nil {
 		existing.Data = make(map[string]string, 1)
 	}
@@ -92,6 +93,7 @@ func (r *TrafficScenarioReconciler) applyDeployment(
 
 func applyManagedDeploymentFields(existing, desired *appsv1.Deployment) {
 	setManagedMapValues(&existing.Labels, desired.Labels)
+	setManagedMapValues(&existing.Annotations, desired.Annotations)
 	existing.Spec.Replicas = desired.Spec.Replicas
 	existing.Spec.RevisionHistoryLimit = desired.Spec.RevisionHistoryLimit
 	existing.Spec.ProgressDeadlineSeconds = desired.Spec.ProgressDeadlineSeconds
@@ -144,6 +146,9 @@ func applyManagedScenarioVolume(podSpec *corev1.PodSpec, desired corev1.Volume) 
 }
 
 func setManagedMapValues(target *map[string]string, desired map[string]string) {
+	if len(desired) == 0 {
+		return
+	}
 	if *target == nil {
 		*target = make(map[string]string, len(desired))
 	}
