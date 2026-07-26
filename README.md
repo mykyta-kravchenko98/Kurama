@@ -247,12 +247,18 @@ burst preserves the selected average RPM.
 ## Development
 
 ```bash
+go generate ./api/v1alpha1
 go vet ./...
 go test ./...
 golangci-lint run
 go build ./cmd/manager
 go build ./cmd/runner
 ```
+
+The Go API types and their kubebuilder markers are the source of truth for the
+TrafficScenario CRD. Run `go generate ./api/v1alpha1` after changing them and
+commit both the generated deepcopy implementation and CRD manifest. CI repeats
+the generation and rejects stale generated artifacts.
 
 The CI workflow targets Linux/amd64 because the initial deployment target is
 the local kind cluster maintained by `shorturl-gitops`.

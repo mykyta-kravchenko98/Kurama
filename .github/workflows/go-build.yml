@@ -80,6 +80,13 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      - name: Verify generated API artifacts
+        run: |
+          go generate ./api/v1alpha1
+          git diff --exit-code -- \
+            api/v1alpha1/zz_generated.deepcopy.go \
+            config/crd/bases/traffic.kurama.dev_trafficscenarios.yaml
+
       - name: Go vet
         run: go vet ./...
 
