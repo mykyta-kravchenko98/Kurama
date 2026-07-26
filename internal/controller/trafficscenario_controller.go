@@ -120,8 +120,19 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret, r.RedisAddress)
-	if err := r.applyDeployment(ctx, &scenario, deployment); err != nil {
+	deploymentChanged, err := r.applyDeployment(ctx, &scenario, deployment)
+	if err != nil {
 		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
+	}
+	if deploymentChanged {
+		return r.reconcileResultForState(
+			ctx,
+			&scenario,
+			progressingState(
+				reasonRunnerDeploymentChanged,
+				"Runner Deployment was created or updated; waiting for rollout status",
+			),
+		)
 	}
 
 	var currentDeployment appsv1.Deployment

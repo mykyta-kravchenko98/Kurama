@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -114,6 +115,13 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 	}
 	assertScenarioCondition(t, actualScenario.Status, trafficv1alpha1.ConditionProgressing, metav1.ConditionTrue)
 	assertScenarioCondition(t, actualScenario.Status, trafficv1alpha1.ConditionReady, metav1.ConditionFalse)
+	progressing := apimeta.FindStatusCondition(
+		actualScenario.Status.Conditions,
+		trafficv1alpha1.ConditionProgressing,
+	)
+	if progressing == nil || progressing.Reason != reasonRunnerDeploymentChanged {
+		t.Fatalf("progressing condition = %#v, want reason %q", progressing, reasonRunnerDeploymentChanged)
+	}
 }
 
 func TestReconcileReportsReadyDeployment(t *testing.T) {
@@ -171,6 +179,86 @@ func TestReconcileReportsReadyDeployment(t *testing.T) {
 	}
 	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionReady, metav1.ConditionTrue)
 	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionProgressing, metav1.ConditionFalse)
+}
+
+func TestReconcileReportsProgressingAfterUpdatingDeployment(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := newScheme(t)
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shorturl", Namespace: "shorturl", UID: types.UID("scenario-uid"), Generation: 1,
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario, &appsv1.Deployment{}).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{
+		Client: fakeClient, Scheme: scheme, RunnerImage: "example.test/kurama:first",
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	key := types.NamespacedName{Namespace: scenario.Namespace, Name: "shorturl-runner"}
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+	if err := fakeClient.Status().Update(ctx, &deployment); err != nil {
+		t.Fatalf("update Deployment status: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("ready reconcile: %v", err)
+	}
+
+	var updatedScenario trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &updatedScenario); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	updatedScenario.Spec.Operations[0].Weight++
+	updatedScenario.Generation++
+	if err := fakeClient.Update(ctx, &updatedScenario); err != nil {
+		t.Fatalf("update TrafficScenario: %v", err)
+	}
+	reconciler.RunnerImage = "example.test/kurama:second"
+
+	result, err := reconciler.Reconcile(ctx, requestFor(&updatedScenario))
+	if err != nil {
+		t.Fatalf("changed reconcile: %v", err)
+	}
+	if result.RequeueAfter != rolloutRequeueInterval {
+		t.Fatalf("requeueAfter = %v, want %v", result.RequeueAfter, rolloutRequeueInterval)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &updatedScenario); err != nil {
+		t.Fatalf("get reconciled TrafficScenario: %v", err)
+	}
+	if updatedScenario.Status.Phase != trafficv1alpha1.PhaseProgressing {
+		t.Fatalf(
+			"scenario phase = %q, want %q",
+			updatedScenario.Status.Phase,
+			trafficv1alpha1.PhaseProgressing,
+		)
+	}
+	progressing := apimeta.FindStatusCondition(
+		updatedScenario.Status.Conditions,
+		trafficv1alpha1.ConditionProgressing,
+	)
+	if progressing == nil || progressing.Reason != reasonRunnerDeploymentChanged {
+		t.Fatalf("progressing condition = %#v, want reason %q", progressing, reasonRunnerDeploymentChanged)
+	}
+	if err := fakeClient.Get(ctx, key, &deployment); err != nil {
+		t.Fatalf("get updated Deployment: %v", err)
+	}
+	if got := deployment.Spec.Template.Spec.Containers[0].Image; got != reconciler.RunnerImage {
+		t.Fatalf("runner image = %q, want %q", got, reconciler.RunnerImage)
+	}
 }
 
 func TestReconcileReportsFailedDeploymentRollout(t *testing.T) {
@@ -263,6 +351,9 @@ func TestReconcileDoesNotWriteUnchangedResources(t *testing.T) {
 	defaultedDeployment.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirst
 	if err := fakeClient.Update(ctx, &defaultedDeployment); err != nil {
 		t.Fatalf("apply simulated API defaults: %v", err)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(scenario)); err != nil {
+		t.Fatalf("stabilize progressing status: %v", err)
 	}
 
 	var configMapBefore corev1.ConfigMap

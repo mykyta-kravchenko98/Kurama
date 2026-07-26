@@ -22,6 +22,7 @@ const (
 	reasonControllerConfigurationInvalid = "ControllerConfigurationInvalid"
 	reasonReconcileFailed                = "ReconcileFailed"
 	reasonRolloutFailed                  = "RolloutFailed"
+	reasonRunnerDeploymentChanged        = "RunnerDeploymentChanged"
 	reasonRunnerDeletionRequested        = "RunnerDeletionRequested"
 	reasonRunnerProgressing              = "RunnerProgressing"
 	reasonRunnerReady                    = "RunnerReady"

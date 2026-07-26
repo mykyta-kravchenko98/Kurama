@@ -58,37 +58,37 @@ func (r *TrafficScenarioReconciler) applyDeployment(
 	ctx context.Context,
 	scenario *trafficv1alpha1.TrafficScenario,
 	desired *appsv1.Deployment,
-) error {
+) (bool, error) {
 	var existing appsv1.Deployment
 	key := client.ObjectKeyFromObject(desired)
 	if err := r.Get(ctx, key, &existing); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get runner Deployment: %w", err)
+			return false, fmt.Errorf("get runner Deployment: %w", err)
 		}
 		if err := controllerutil.SetControllerReference(scenario, desired, r.Scheme); err != nil {
-			return fmt.Errorf("set runner Deployment owner: %w", err)
+			return false, fmt.Errorf("set runner Deployment owner: %w", err)
 		}
 		if err := r.Create(ctx, desired); err != nil {
-			return fmt.Errorf("create runner Deployment: %w", err)
+			return false, fmt.Errorf("create runner Deployment: %w", err)
 		}
-		return nil
+		return true, nil
 	}
 	if err := ensureControlledBy(&existing, scenario, "Deployment"); err != nil {
-		return err
+		return false, err
 	}
 	if !apiequality.Semantic.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) {
-		return fmt.Errorf("runner Deployment %q has an unexpected immutable selector", existing.Name)
+		return false, fmt.Errorf("runner Deployment %q has an unexpected immutable selector", existing.Name)
 	}
 
 	before := existing.DeepCopy()
 	applyManagedDeploymentFields(&existing, desired)
 	if apiequality.Semantic.DeepEqual(before, &existing) {
-		return nil
+		return false, nil
 	}
 	if err := r.Patch(ctx, &existing, client.MergeFrom(before)); err != nil {
-		return fmt.Errorf("patch runner Deployment: %w", err)
+		return false, fmt.Errorf("patch runner Deployment: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func applyManagedDeploymentFields(existing, desired *appsv1.Deployment) {
