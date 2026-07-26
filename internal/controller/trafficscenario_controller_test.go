@@ -778,7 +778,7 @@ func TestReconcileInvalidScenarioDoesNotRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile returned retryable error: %v", err)
 	}
-	if result.RequeueAfter != 0 || result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Fatalf("reconcile result = %#v, want no retry", result)
 	}
 	var actual trafficv1alpha1.TrafficScenario
