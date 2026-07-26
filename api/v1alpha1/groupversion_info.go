@@ -1,5 +1,8 @@
 // +kubebuilder:object:generate=true
 // +groupName=traffic.kurama.dev
+//
+//go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0 object paths=.
+//go:generate go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.19.0 crd paths=. output:crd:artifacts:config=../../config/crd/bases
 package v1alpha1
 
 import (

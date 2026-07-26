@@ -5,6 +5,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 type TargetSpec struct {
 	// BaseURL must be an absolute HTTP or HTTPS URL. Cluster-local Services are
 	// expected to use their normal Kubernetes DNS name here.
+	// +kubebuilder:validation:Pattern=`^https?://.+`
 	BaseURL string `json:"baseURL"`
 }
 
@@ -96,8 +97,11 @@ type RateProfileSpec struct {
 }
 
 type StoreSpec struct {
-	Name     string `json:"name"`
-	Capacity int    `json:"capacity"`
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100000
+	Capacity int `json:"capacity"`
 }
 
 type StorageType string
@@ -116,44 +120,70 @@ type StorageSpec struct {
 }
 
 type VariableSourceSpec struct {
-	Type   string `json:"type"`
-	Store  string `json:"store,omitempty"`
-	Length int    `json:"length,omitempty"`
+	// +kubebuilder:validation:Enum=randomUUID;randomBase62;store
+	Type string `json:"type"`
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
+	// +optional
+	Store string `json:"store,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=128
+	// +optional
+	Length int `json:"length,omitempty"`
 }
 
 type VariableSpec struct {
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
 	Name   string             `json:"name"`
 	Source VariableSourceSpec `json:"source"`
 }
 
 type RequestSpec struct {
-	Method       string            `json:"method"`
-	PathTemplate string            `json:"pathTemplate"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	BodyTemplate string            `json:"bodyTemplate,omitempty"`
-	Variables    []VariableSpec    `json:"variables,omitempty"`
+	// +kubebuilder:validation:Enum=GET;POST
+	Method string `json:"method"`
+	// +kubebuilder:validation:MinLength=1
+	PathTemplate string `json:"pathTemplate"`
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
+	// +kubebuilder:validation:MaxLength=65536
+	// +optional
+	BodyTemplate string `json:"bodyTemplate,omitempty"`
+	// +optional
+	Variables []VariableSpec `json:"variables,omitempty"`
 }
 
 type CaptureSpec struct {
+	// +kubebuilder:validation:Pattern=`^/`
 	JSONPointer string `json:"jsonPointer"`
-	Store       string `json:"store"`
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
+	Store string `json:"store"`
 }
 
 type OperationSpec struct {
-	Name                string       `json:"name"`
-	Weight              int          `json:"weight"`
-	Request             RequestSpec  `json:"request"`
-	ExpectedStatusCodes []int        `json:"expectedStatusCodes"`
-	Capture             *CaptureSpec `json:"capture,omitempty"`
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	Weight  int         `json:"weight"`
+	Request RequestSpec `json:"request"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=100
+	// +kubebuilder:validation:items:Maximum=599
+	ExpectedStatusCodes []int `json:"expectedStatusCodes"`
+	// +optional
+	Capture *CaptureSpec `json:"capture,omitempty"`
 }
 
 // TrafficScenarioSpec is the desired HTTP workload and runner lifecycle.
 // Suspending a scenario removes its runner Deployment without deleting its
 // configuration.
 type TrafficScenarioSpec struct {
-	Target     TargetSpec      `json:"target"`
-	Rate       RateSpec        `json:"rate"`
-	Stores     []StoreSpec     `json:"stores,omitempty"`
+	Target TargetSpec `json:"target"`
+	Rate   RateSpec   `json:"rate"`
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Stores []StoreSpec `json:"stores,omitempty"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
 	Operations []OperationSpec `json:"operations"`
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
@@ -201,6 +231,7 @@ type TrafficScenarioStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=ts
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.spec.target.baseURL`
 
