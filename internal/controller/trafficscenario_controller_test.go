@@ -994,7 +994,13 @@ func TestReconcileInvalidScenarioDoesNotRetry(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl", Generation: 4},
 		Spec:       validScenarioSpec(),
 	}
-	scenario.Spec.Target.BaseURL = "postgres://database"
+	scenario.Spec.Runner = &trafficv1alpha1.RunnerSpec{
+		Resources: &trafficv1alpha1.RunnerResourcesSpec{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(scenario).
@@ -1026,6 +1032,10 @@ func TestReconcileInvalidScenarioDoesNotRetry(t *testing.T) {
 		)
 	}
 	assertScenarioCondition(t, actual.Status, trafficv1alpha1.ConditionDegraded, metav1.ConditionTrue)
+	degraded := apimeta.FindStatusCondition(actual.Status.Conditions, trafficv1alpha1.ConditionDegraded)
+	if degraded == nil || degraded.Reason != reasonValidationFailed {
+		t.Fatalf("degraded condition = %#v, want reason %q", degraded, reasonValidationFailed)
+	}
 }
 
 func TestValidateScenarioRejectsNonHTTPURL(t *testing.T) {
@@ -1057,6 +1067,65 @@ func TestValidateScenarioRejectsUnknownStorageType(t *testing.T) {
 	scenario.Spec.Storage = &trafficv1alpha1.StorageSpec{Type: "postgres"}
 	if err := validateScenario(scenario); err == nil {
 		t.Fatal("validateScenario unexpectedly accepted unknown storage type")
+	}
+}
+
+func TestValidateScenarioRejectsInvalidRunnerResources(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		resources trafficv1alpha1.RunnerResourcesSpec
+		wantError string
+	}{
+		{
+			name: "request exceeds default limit",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				},
+			},
+			wantError: "must not exceed limit",
+		},
+		{
+			name: "limit is below default request",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("10m"),
+				},
+			},
+			wantError: "must not exceed limit",
+		},
+		{
+			name: "negative quantity",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("-1Mi"),
+				},
+			},
+			wantError: "must not be negative",
+		},
+		{
+			name: "unsupported resource",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName("example.com/gpu"): resource.MustParse("1"),
+				},
+			},
+			wantError: "unsupported resource",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+			scenario.Spec.Runner = &trafficv1alpha1.RunnerSpec{Resources: &test.resources}
+
+			err := validateScenario(scenario)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("validateScenario() error = %v, want containing %q", err, test.wantError)
+			}
+		})
 	}
 }
 

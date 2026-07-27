@@ -3,6 +3,8 @@ package controller
 import (
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 )
 
@@ -44,8 +46,73 @@ func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
 	if replicas > 1 && rateLimiterBackend(scenario) != string(trafficv1alpha1.RateLimiterTypeRedis) {
 		return fmt.Errorf("spec.replicas greater than 1 requires spec.rate.limiter.type redis")
 	}
+	if err := validateRunnerResources(scenario); err != nil {
+		return err
+	}
 	if err := scenarioRunnerConfig(scenario).Validate(); err != nil {
 		return fmt.Errorf("spec: %w", err)
 	}
 	return nil
+}
+
+func validateRunnerResources(scenario *trafficv1alpha1.TrafficScenario) error {
+	if scenario.Spec.Runner == nil || scenario.Spec.Runner.Resources == nil {
+		return nil
+	}
+
+	overrides := scenario.Spec.Runner.Resources
+	if err := validateRunnerResourceList("requests", overrides.Requests); err != nil {
+		return err
+	}
+	if err := validateRunnerResourceList("limits", overrides.Limits); err != nil {
+		return err
+	}
+
+	merged := runnerResources(scenario)
+	for _, name := range []corev1.ResourceName{
+		corev1.ResourceCPU,
+		corev1.ResourceMemory,
+		corev1.ResourceEphemeralStorage,
+	} {
+		request := merged.Requests[name]
+		limit := merged.Limits[name]
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf(
+				"spec.runner.resources.requests[%q] must not exceed limit (%s > %s)",
+				name,
+				request.String(),
+				limit.String(),
+			)
+		}
+	}
+	return nil
+}
+
+func validateRunnerResourceList(field string, resources corev1.ResourceList) error {
+	for name, quantity := range resources {
+		if !isAllowedRunnerResource(name) {
+			return fmt.Errorf(
+				"spec.runner.resources.%s contains unsupported resource %q; use cpu, memory or ephemeral-storage",
+				field,
+				name,
+			)
+		}
+		if quantity.Sign() < 0 {
+			return fmt.Errorf(
+				"spec.runner.resources.%s[%q] must not be negative",
+				field,
+				name,
+			)
+		}
+	}
+	return nil
+}
+
+func isAllowedRunnerResource(name corev1.ResourceName) bool {
+	switch name {
+	case corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage:
+		return true
+	default:
+		return false
+	}
 }
