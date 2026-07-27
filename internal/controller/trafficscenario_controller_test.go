@@ -101,8 +101,9 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 			t.Errorf("runner annotation %q = %q, want %q", name, got, want)
 		}
 	}
-	if got := deployment.Spec.Template.Annotations[configHashAnnotation]; got == "" {
-		t.Fatal("runner config hash annotation is empty")
+	if got, want := deployment.Spec.Template.Annotations[configHashAnnotation],
+		configHash(configMap.Data[scenarioConfigKey]); got != want {
+		t.Fatalf("runner config hash annotation = %q, want %q", got, want)
 	}
 
 	var actualScenario trafficv1alpha1.TrafficScenario
@@ -525,7 +526,14 @@ func TestDesiredDeploymentMergesCustomRunnerResourcesWithDefaults(t *testing.T) 
 		},
 	}
 
-	deployment := desiredDeployment(scenario, "shorturl-runner", "image", "", "")
+	deployment := desiredDeployment(
+		scenario,
+		"shorturl-runner",
+		"image",
+		"",
+		"",
+		mustScenarioConfigJSON(t, scenario),
+	)
 	resources := deployment.Spec.Template.Spec.Containers[0].Resources
 	assertResourceQuantity(t, resources.Requests, corev1.ResourceCPU, "100m")
 	assertResourceQuantity(t, resources.Requests, corev1.ResourceMemory, defaultRunnerMemoryRequest)
@@ -935,7 +943,14 @@ func TestReconcileSuspendDeletesRunnerDeployment(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "shorturl", Namespace: "shorturl"},
 		Spec:       trafficv1alpha1.TrafficScenarioSpec{Suspend: true},
 	}
-	deployment := desiredDeployment(scenario, "shorturl-runner", "example.test/kurama:test", "", "")
+	deployment := desiredDeployment(
+		scenario,
+		"shorturl-runner",
+		"example.test/kurama:test",
+		"",
+		"",
+		mustScenarioConfigJSON(t, scenario),
+	)
 	scenario.UID = types.UID("scenario-uid")
 	if err := controllerutil.SetControllerReference(scenario, deployment, scheme); err != nil {
 		t.Fatalf("set Deployment owner: %v", err)
@@ -1125,9 +1140,25 @@ func TestValidateScenarioRejectsUnknownRateSchedule(t *testing.T) {
 func TestDesiredDeploymentConfigChangeUpdatesHash(t *testing.T) {
 	t.Parallel()
 	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
-	before := desiredDeployment(scenario, "shorturl-runner", "image", "", "").Spec.Template.Annotations[configHashAnnotation]
+	beforeConfig := mustScenarioConfigJSON(t, scenario)
+	before := desiredDeployment(
+		scenario,
+		"shorturl-runner",
+		"image",
+		"",
+		"",
+		beforeConfig,
+	).Spec.Template.Annotations[configHashAnnotation]
 	scenario.Spec.Operations[0].Weight++
-	after := desiredDeployment(scenario, "shorturl-runner", "image", "", "").Spec.Template.Annotations[configHashAnnotation]
+	afterConfig := mustScenarioConfigJSON(t, scenario)
+	after := desiredDeployment(
+		scenario,
+		"shorturl-runner",
+		"image",
+		"",
+		"",
+		afterConfig,
+	).Spec.Template.Annotations[configHashAnnotation]
 	if before == after {
 		t.Fatal("config hash did not change after scenario update")
 	}
@@ -1185,8 +1216,9 @@ func TestLongScenarioUsesSafeLabelAndFullNameAnnotation(t *testing.T) {
 		Spec: validScenarioSpec(),
 	}
 	name := runnerName(scenario.Name)
-	configMap := desiredConfigMap(scenario, name)
-	deployment := desiredDeployment(scenario, name, "example.test/kurama:test", "", "")
+	config := mustScenarioConfigJSON(t, scenario)
+	configMap := desiredConfigMap(scenario, name, config)
+	deployment := desiredDeployment(scenario, name, "example.test/kurama:test", "", "", config)
 
 	wantLabel := hashedScenarioLabelPrefix + scenarioHash(scenario.Name)
 	if got := configMap.Labels[scenarioLabel]; got != wantLabel {
@@ -1327,6 +1359,15 @@ func validScenarioSpec() trafficv1alpha1.TrafficScenarioSpec {
 			},
 		},
 	}
+}
+
+func mustScenarioConfigJSON(t *testing.T, scenario *trafficv1alpha1.TrafficScenario) string {
+	t.Helper()
+	config, err := scenarioConfigJSON(scenario)
+	if err != nil {
+		t.Fatalf("marshal scenario runner config: %v", err)
+	}
+	return config
 }
 
 func newScheme(t *testing.T) *runtime.Scheme {
