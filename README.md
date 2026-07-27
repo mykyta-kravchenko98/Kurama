@@ -28,8 +28,12 @@ block reconciliation of the custom resource.
 
 The supported protocol is currently HTTP/HTTPS. A scenario declares a target,
 weighted request operations, a traffic profile and bounded value stores.
-Authentication and Secret references are planned; secret values will never be
-stored directly in the custom resource.
+Kurama rejects literal values in known credential-bearing headers as a
+guardrail against accidentally storing common credentials in a
+`TrafficScenario`. Arbitrary scenario fields, including request paths, bodies
+and custom headers, may still contain sensitive strings and must not be used
+for credentials. Supported authentication will use Kubernetes Secret
+references without storing secret values directly in the custom resource.
 
 ## Implementation status and roadmap
 
