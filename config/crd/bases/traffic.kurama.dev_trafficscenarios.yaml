@@ -86,7 +86,14 @@ spec:
                         headers:
                           additionalProperties:
                             type: string
+                          description: Literal sensitive headers are forbidden until
+                            SecretRef-backed authentication is supported.
+                          maxProperties: 64
                           type: object
+                          x-kubernetes-validations:
+                          - message: literal sensitive headers are forbidden; use
+                              SecretRef support when it becomes available
+                            rule: self.all(key, !key.lowerAscii().matches('^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$'))
                         method:
                           enum:
                           - GET

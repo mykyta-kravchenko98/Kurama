@@ -94,6 +94,12 @@ func validateHeaders(headers map[string]string) error {
 		if name == "" || strings.ContainsAny(name, " \t\r\n:") {
 			return fmt.Errorf("request.headers contains invalid header name %q", name)
 		}
+		if isSensitiveHeader(name) {
+			return fmt.Errorf(
+				"request.headers must not contain sensitive header %q; SecretRef support is not available",
+				name,
+			)
+		}
 		if strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("request.headers[%q] contains a line break", name)
 		}
@@ -106,6 +112,15 @@ func validateHeaders(headers map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func isSensitiveHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateVariable(variable VariableConfig, stores map[string]struct{}) error {

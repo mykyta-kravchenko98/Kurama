@@ -151,6 +151,9 @@ turning it into an in-house replacement for a complete load-testing platform.
   replicas cannot exceed the shared window budget or fragment a granted group.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
+- Reject literal `Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie` and `X-API-Key` headers at CRD admission and runner validation
+  until SecretRef-backed authentication is available.
 
 ### Phase 5 — future backlog for reusable and hardened HTTP scenarios
 

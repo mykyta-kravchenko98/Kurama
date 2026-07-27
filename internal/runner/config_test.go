@@ -115,6 +115,33 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsSensitiveHeadersCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	headers := []string{
+		"Authorization",
+		"proxy-authorization",
+		"COOKIE",
+		"Set-Cookie",
+		"x-ApI-kEy",
+	}
+
+	for _, header := range headers {
+		t.Run(header, func(t *testing.T) {
+			t.Parallel()
+			config := validConfig()
+			config.Operations[0].Request.Headers[header] = "must-not-appear-in-error"
+
+			err := config.Validate()
+			if err == nil || !strings.Contains(err.Error(), "sensitive header") {
+				t.Fatalf("Validate() error = %v, want sensitive header rejection", err)
+			}
+			if strings.Contains(err.Error(), "must-not-appear-in-error") {
+				t.Fatalf("Validate() error leaked the sensitive header value: %v", err)
+			}
+		})
+	}
+}
+
 func TestDecodeConfig(t *testing.T) {
 	t.Parallel()
 	want := validConfig()
