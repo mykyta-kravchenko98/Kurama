@@ -1,6 +1,9 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 type TargetSpec struct {
 	// BaseURL must be an absolute HTTP or HTTPS URL. Cluster-local Services are
@@ -119,6 +122,23 @@ type StorageSpec struct {
 	Type StorageType `json:"type,omitempty"`
 }
 
+// RunnerSpec configures resources for the generated runner workload. Security
+// hardening is controller-owned and cannot be weakened through TrafficScenario.
+type RunnerSpec struct {
+	// Resources overrides the controller defaults. Omitted CPU, memory and
+	// ephemeral-storage entries retain their default request or limit.
+	// +optional
+	Resources *RunnerResourcesSpec `json:"resources,omitempty"`
+}
+
+// RunnerResourcesSpec configures compute resources for the runner container.
+type RunnerResourcesSpec struct {
+	// +optional
+	Requests corev1.ResourceList `json:"requests,omitempty"`
+	// +optional
+	Limits corev1.ResourceList `json:"limits,omitempty"`
+}
+
 type VariableSourceSpec struct {
 	// +kubebuilder:validation:Enum=randomUUID;randomBase62;store
 	Type string `json:"type"`
@@ -198,6 +218,9 @@ type TrafficScenarioSpec struct {
 	// +kubebuilder:validation:Maximum=10
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+	// Runner configures the generated runner workload.
+	// +optional
+	Runner *RunnerSpec `json:"runner,omitempty"`
 }
 
 type TrafficScenarioPhase string
