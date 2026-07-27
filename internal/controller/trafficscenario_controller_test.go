@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -65,6 +66,7 @@ func TestReconcileCreatesRunnerResources(t *testing.T) {
 		t.Fatalf("get Deployment: %v", err)
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
+	assertRunnerHardening(t, deployment.Spec.Template.Spec, container)
 	if got := container.Image; got != "example.test/kurama:test" {
 		t.Fatalf("runner image = %q", got)
 	}
@@ -448,7 +450,19 @@ func TestReconcilePreservesUnmanagedResourceFields(t *testing.T) {
 	deployment.Labels["example.test/custom"] = "preserved"
 	deployment.Annotations = map[string]string{"example.test/custom": "preserved"}
 	deployment.Spec.Template.Annotations["example.test/custom"] = "preserved"
-	deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	podSpec := &deployment.Spec.Template.Spec
+	podSpec.AutomountServiceAccountToken = ptr.To(true)
+	podSpec.EnableServiceLinks = ptr.To(true)
+	podSpec.SecurityContext.RunAsNonRoot = ptr.To(false)
+	podSpec.SecurityContext.SeccompProfile.Type = corev1.SeccompProfileTypeUnconfined
+	podSpec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	podSpec.Containers[0].Resources = corev1.ResourceRequirements{}
+	podSpec.Containers[0].SecurityContext = &corev1.SecurityContext{
+		Privileged:               ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(true),
+		ReadOnlyRootFilesystem:   ptr.To(false),
+		Capabilities:             &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}},
+	}
 	deployment.Spec.Template.Spec.Containers = append(
 		deployment.Spec.Template.Spec.Containers,
 		corev1.Container{Name: "injected", Image: "example.test/sidecar:test"},
@@ -486,6 +500,7 @@ func TestReconcilePreservesUnmanagedResourceFields(t *testing.T) {
 		t.Fatalf("unmanaged Deployment metadata was not preserved: %#v", deployment.ObjectMeta)
 	}
 	runnerContainer := deployment.Spec.Template.Spec.Containers[0]
+	assertRunnerHardening(t, deployment.Spec.Template.Spec, runnerContainer)
 	if runnerContainer.Image != "example.test/kurama:second" ||
 		runnerContainer.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("runner container = %#v", runnerContainer)
@@ -494,6 +509,40 @@ func TestReconcilePreservesUnmanagedResourceFields(t *testing.T) {
 		deployment.Spec.Template.Spec.Containers[1].Name != "injected" {
 		t.Fatalf("injected sidecar was not preserved: %#v", deployment.Spec.Template.Spec.Containers)
 	}
+}
+
+func TestDesiredDeploymentMergesCustomRunnerResourcesWithDefaults(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Runner = &trafficv1alpha1.RunnerSpec{
+		Resources: &trafficv1alpha1.RunnerResourcesSpec{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("100m"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		},
+	}
+
+	deployment := desiredDeployment(scenario, "shorturl-runner", "image", "", "")
+	resources := deployment.Spec.Template.Spec.Containers[0].Resources
+	assertResourceQuantity(t, resources.Requests, corev1.ResourceCPU, "100m")
+	assertResourceQuantity(t, resources.Requests, corev1.ResourceMemory, defaultRunnerMemoryRequest)
+	assertResourceQuantity(
+		t,
+		resources.Requests,
+		corev1.ResourceEphemeralStorage,
+		defaultRunnerEphemeralStorageRequest,
+	)
+	assertResourceQuantity(t, resources.Limits, corev1.ResourceCPU, defaultRunnerCPULimit)
+	assertResourceQuantity(t, resources.Limits, corev1.ResourceMemory, "256Mi")
+	assertResourceQuantity(
+		t,
+		resources.Limits,
+		corev1.ResourceEphemeralStorage,
+		defaultRunnerEphemeralStorageLimit,
+	)
 }
 
 func TestReconcileRefusesToModifyForeignOwnedDeployment(t *testing.T) {
@@ -598,6 +647,81 @@ func assertRunnerRolloutStrategy(t *testing.T, spec appsv1.DeploymentSpec) {
 	}
 	if rollingUpdate.MaxSurge == nil || rollingUpdate.MaxSurge.IntVal != 1 {
 		t.Errorf("maxSurge = %v, want 1", rollingUpdate.MaxSurge)
+	}
+}
+
+func assertRunnerHardening(t *testing.T, podSpec corev1.PodSpec, container corev1.Container) {
+	t.Helper()
+	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
+		t.Errorf("automountServiceAccountToken = %v, want false", podSpec.AutomountServiceAccountToken)
+	}
+	if podSpec.EnableServiceLinks == nil || *podSpec.EnableServiceLinks {
+		t.Errorf("enableServiceLinks = %v, want false", podSpec.EnableServiceLinks)
+	}
+	if podSpec.SecurityContext == nil ||
+		podSpec.SecurityContext.RunAsNonRoot == nil ||
+		!*podSpec.SecurityContext.RunAsNonRoot {
+		t.Errorf("pod securityContext.runAsNonRoot is not true: %#v", podSpec.SecurityContext)
+	}
+	if podSpec.SecurityContext == nil ||
+		podSpec.SecurityContext.SeccompProfile == nil ||
+		podSpec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod seccompProfile is not RuntimeDefault: %#v", podSpec.SecurityContext)
+	}
+
+	securityContext := container.SecurityContext
+	if securityContext == nil {
+		t.Fatal("runner securityContext is nil")
+	}
+	if securityContext.Privileged == nil || *securityContext.Privileged {
+		t.Errorf("runner privileged = %v, want false", securityContext.Privileged)
+	}
+	if securityContext.AllowPrivilegeEscalation == nil || *securityContext.AllowPrivilegeEscalation {
+		t.Errorf("runner allowPrivilegeEscalation = %v, want false", securityContext.AllowPrivilegeEscalation)
+	}
+	if securityContext.ReadOnlyRootFilesystem == nil || !*securityContext.ReadOnlyRootFilesystem {
+		t.Errorf("runner readOnlyRootFilesystem = %v, want true", securityContext.ReadOnlyRootFilesystem)
+	}
+	if securityContext.Capabilities == nil ||
+		len(securityContext.Capabilities.Add) != 0 ||
+		len(securityContext.Capabilities.Drop) != 1 ||
+		securityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("runner capabilities = %#v, want drop ALL", securityContext.Capabilities)
+	}
+
+	assertResourceQuantity(t, container.Resources.Requests, corev1.ResourceCPU, defaultRunnerCPURequest)
+	assertResourceQuantity(t, container.Resources.Requests, corev1.ResourceMemory, defaultRunnerMemoryRequest)
+	assertResourceQuantity(
+		t,
+		container.Resources.Requests,
+		corev1.ResourceEphemeralStorage,
+		defaultRunnerEphemeralStorageRequest,
+	)
+	assertResourceQuantity(t, container.Resources.Limits, corev1.ResourceCPU, defaultRunnerCPULimit)
+	assertResourceQuantity(t, container.Resources.Limits, corev1.ResourceMemory, defaultRunnerMemoryLimit)
+	assertResourceQuantity(
+		t,
+		container.Resources.Limits,
+		corev1.ResourceEphemeralStorage,
+		defaultRunnerEphemeralStorageLimit,
+	)
+}
+
+func assertResourceQuantity(
+	t *testing.T,
+	resources corev1.ResourceList,
+	name corev1.ResourceName,
+	want string,
+) {
+	t.Helper()
+	got, exists := resources[name]
+	if !exists {
+		t.Errorf("resource %q is missing; want %s", name, want)
+		return
+	}
+	wantQuantity := resource.MustParse(want)
+	if got.Cmp(wantQuantity) != 0 {
+		t.Errorf("resource %q = %s, want %s", name, got.String(), want)
 	}
 }
 

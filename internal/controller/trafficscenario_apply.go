@@ -101,9 +101,25 @@ func applyManagedDeploymentFields(existing, desired *appsv1.Deployment) {
 
 	setManagedMapValues(&existing.Spec.Template.Labels, desired.Spec.Template.Labels)
 	setManagedMapValues(&existing.Spec.Template.Annotations, desired.Spec.Template.Annotations)
-	existing.Spec.Template.Spec.ImagePullSecrets = desired.Spec.Template.Spec.ImagePullSecrets
-	applyManagedRunnerContainer(&existing.Spec.Template.Spec, desired.Spec.Template.Spec.Containers[0])
-	applyManagedScenarioVolume(&existing.Spec.Template.Spec, desired.Spec.Template.Spec.Volumes[0])
+	existingPodSpec := &existing.Spec.Template.Spec
+	desiredPodSpec := &desired.Spec.Template.Spec
+	existingPodSpec.ImagePullSecrets = desiredPodSpec.ImagePullSecrets
+	existingPodSpec.AutomountServiceAccountToken = desiredPodSpec.AutomountServiceAccountToken
+	existingPodSpec.EnableServiceLinks = desiredPodSpec.EnableServiceLinks
+	applyManagedPodSecurityContext(existingPodSpec, desiredPodSpec.SecurityContext)
+	applyManagedRunnerContainer(existingPodSpec, desiredPodSpec.Containers[0])
+	applyManagedScenarioVolume(existingPodSpec, desiredPodSpec.Volumes[0])
+}
+
+func applyManagedPodSecurityContext(podSpec *corev1.PodSpec, desired *corev1.PodSecurityContext) {
+	if desired == nil {
+		return
+	}
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	podSpec.SecurityContext.RunAsNonRoot = desired.RunAsNonRoot
+	podSpec.SecurityContext.SeccompProfile = desired.SeccompProfile.DeepCopy()
 }
 
 func applyManagedRunnerContainer(podSpec *corev1.PodSpec, desired corev1.Container) {
@@ -118,12 +134,27 @@ func applyManagedRunnerContainer(podSpec *corev1.PodSpec, desired corev1.Contain
 		container.Env = desired.Env
 		container.VolumeMounts = desired.VolumeMounts
 		container.Ports = desired.Ports
+		container.Resources = *desired.Resources.DeepCopy()
+		applyManagedContainerSecurityContext(container, desired.SecurityContext)
 		container.StartupProbe = desired.StartupProbe
 		container.LivenessProbe = desired.LivenessProbe
 		container.ReadinessProbe = desired.ReadinessProbe
 		return
 	}
 	podSpec.Containers = append(podSpec.Containers, desired)
+}
+
+func applyManagedContainerSecurityContext(container *corev1.Container, desired *corev1.SecurityContext) {
+	if desired == nil {
+		return
+	}
+	if container.SecurityContext == nil {
+		container.SecurityContext = &corev1.SecurityContext{}
+	}
+	container.SecurityContext.Privileged = desired.Privileged
+	container.SecurityContext.AllowPrivilegeEscalation = desired.AllowPrivilegeEscalation
+	container.SecurityContext.ReadOnlyRootFilesystem = desired.ReadOnlyRootFilesystem
+	container.SecurityContext.Capabilities = desired.Capabilities.DeepCopy()
 }
 
 func applyManagedScenarioVolume(podSpec *corev1.PodSpec, desired corev1.Volume) {

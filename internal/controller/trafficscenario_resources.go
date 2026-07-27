@@ -50,12 +50,17 @@ func desiredDeployment(
 		podAnnotations[key] = value
 	}
 	podSpec := corev1.PodSpec{
+		AutomountServiceAccountToken: ptr.To(false),
+		EnableServiceLinks:           ptr.To(false),
+		SecurityContext:              runnerPodSecurityContext(),
 		Containers: []corev1.Container{{
-			Name:         "runner",
-			Image:        image,
-			Command:      []string{"/app/runner"},
-			Env:          runnerEnvironment(scenario, redisAddress),
-			VolumeMounts: []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
+			Name:            "runner",
+			Image:           image,
+			Command:         []string{"/app/runner"},
+			Env:             runnerEnvironment(scenario, redisAddress),
+			Resources:       runnerResources(scenario),
+			SecurityContext: runnerContainerSecurityContext(),
+			VolumeMounts:    []corev1.VolumeMount{{Name: "scenario", MountPath: "/etc/kurama", ReadOnly: true}},
 			Ports: []corev1.ContainerPort{{
 				Name:          runner.MetricsPortName,
 				ContainerPort: runner.MetricsPort,

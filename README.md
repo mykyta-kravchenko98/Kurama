@@ -154,6 +154,11 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Reject literal `Authorization`, `Proxy-Authorization`, `Cookie`,
   `Set-Cookie` and `X-API-Key` headers at CRD admission and runner validation
   until SecretRef-backed authentication is available.
+- Generate runner Pods with no service-account token or service links, a
+  read-only root filesystem, no Linux capabilities or privilege escalation,
+  non-root execution and the runtime-default seccomp profile.
+- Apply bounded CPU, memory and ephemeral-storage defaults while allowing each
+  TrafficScenario to override individual runner requests and limits.
 
 ### Phase 5 — future backlog for reusable and hardened HTTP scenarios
 
@@ -182,6 +187,29 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Executing arbitrary scripts or templates from a custom resource.
 - Storing API credentials in Git or in `TrafficScenario.spec`.
 - Supporting every transport before HTTP scenarios are reliable.
+
+## Runner workload configuration
+
+Kurama applies mandatory security hardening to every generated runner Pod.
+Those settings are controller-owned and cannot be disabled through a
+TrafficScenario. Resource requirements can be adjusted for the expected load:
+
+```yaml
+spec:
+  runner:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 1
+        memory: 256Mi
+```
+
+When `runner.resources` is omitted, Kurama requests `25m` CPU, `32Mi` memory
+and `16Mi` ephemeral storage, with limits of `500m`, `128Mi` and `64Mi`
+respectively. A partial resource configuration overrides only the supplied
+entries and retains defaults for the others.
 
 ## Rate schedule configuration
 
