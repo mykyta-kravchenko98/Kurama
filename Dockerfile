@@ -15,6 +15,6 @@ WORKDIR /app
 COPY --from=build /out/manager /app/manager
 COPY --from=build /out/runner /app/runner
 
-USER nonroot:nonroot
+USER 65532:65532
 
 ENTRYPOINT ["/app/manager"]
