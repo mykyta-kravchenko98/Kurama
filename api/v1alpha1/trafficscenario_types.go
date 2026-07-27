@@ -142,6 +142,9 @@ type RequestSpec struct {
 	Method string `json:"method"`
 	// +kubebuilder:validation:MinLength=1
 	PathTemplate string `json:"pathTemplate"`
+	// Literal sensitive headers are forbidden until SecretRef-backed authentication is supported.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().matches('^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$'))",message="literal sensitive headers are forbidden; use SecretRef support when it becomes available"
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
 	// +kubebuilder:validation:MaxLength=65536

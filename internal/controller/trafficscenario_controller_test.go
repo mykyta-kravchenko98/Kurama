@@ -898,6 +898,20 @@ func TestValidateScenarioRejectsNonHTTPURL(t *testing.T) {
 	}
 }
 
+func TestValidateScenarioRejectsSensitiveHeader(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	scenario.Spec.Operations[0].Request.Headers["Authorization"] = "must-not-appear-in-error"
+
+	err := validateScenario(scenario)
+	if err == nil || !strings.Contains(err.Error(), "sensitive header") {
+		t.Fatalf("validateScenario() error = %v, want sensitive header rejection", err)
+	}
+	if strings.Contains(err.Error(), "must-not-appear-in-error") {
+		t.Fatalf("validateScenario() error leaked the sensitive header value: %v", err)
+	}
+}
+
 func TestValidateScenarioRejectsUnknownStorageType(t *testing.T) {
 	t.Parallel()
 	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
