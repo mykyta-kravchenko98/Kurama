@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -166,6 +168,107 @@ func TestReconcileDeletionStopsRunnerBeforeRedisCleanup(t *testing.T) {
 	}
 }
 
+func TestReconcileDeletionRetriesCleanupBeforeGracePeriodExpires(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	scheme := newScheme(t)
+	now := metav1.NewTime(time.Now())
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "shorturl",
+			Namespace:         "shorturl",
+			UID:               types.UID("scenario-uid"),
+			DeletionTimestamp: &now,
+			Finalizers:        []string{redisCleanupFinalizer},
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	reconciler := &TrafficScenarioReconciler{Client: fakeClient, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != deletionRequeueInterval {
+		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, deletionRequeueInterval)
+	}
+	var actual trafficv1alpha1.TrafficScenario
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &actual); err != nil {
+		t.Fatalf("get TrafficScenario: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&actual, redisCleanupFinalizer) {
+		t.Fatal("Redis cleanup finalizer was removed before the grace period expired")
+	}
+}
+
+func TestReconcileDeletionAbandonsCleanupAfterGracePeriod(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	scheme := newScheme(t)
+	expired := metav1.NewTime(time.Now().Add(-redisCleanupGracePeriod - time.Second))
+	scenario := &trafficv1alpha1.TrafficScenario{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "shorturl",
+			Namespace:         "shorturl",
+			UID:               types.UID("scenario-uid"),
+			DeletionTimestamp: &expired,
+			Finalizers:        []string{redisCleanupFinalizer},
+		},
+		Spec: validScenarioSpec(),
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(scenario).
+		WithObjects(scenario).
+		Build()
+	observer := &recordingRedisCleanupObserver{}
+	recorder := record.NewFakeRecorder(1)
+	reconciler := &TrafficScenarioReconciler{
+		Client:               fakeClient,
+		Scheme:               scheme,
+		RedisCleanupObserver: observer,
+		EventRecorder:        recorder,
+	}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(scenario))
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter = %v, want zero", result.RequeueAfter)
+	}
+	if observer.abandoned != 1 {
+		t.Fatalf("abandoned observations = %d, want 1", observer.abandoned)
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "Warning "+reasonCleanupAbandoned) {
+			t.Fatalf("event = %q, want Warning %s", event, reasonCleanupAbandoned)
+		}
+		if !strings.Contains(event, redisCleanupGracePeriod.String()) {
+			t.Fatalf("event = %q, want grace period %s", event, redisCleanupGracePeriod)
+		}
+	default:
+		t.Fatal("cleanup abandonment Warning Event was not recorded")
+	}
+
+	var actual trafficv1alpha1.TrafficScenario
+	err = fakeClient.Get(ctx, client.ObjectKeyFromObject(scenario), &actual)
+	if err == nil && controllerutil.ContainsFinalizer(&actual, redisCleanupFinalizer) {
+		t.Fatal("Redis cleanup finalizer still exists after the grace period")
+	}
+	if err != nil && client.IgnoreNotFound(err) != nil {
+		t.Fatalf("get TrafficScenario after forced finalization: %v", err)
+	}
+}
+
 func TestSuspendedScenarioKeepsRedisCleanupFinalizer(t *testing.T) {
 	t.Parallel()
 
@@ -222,4 +325,12 @@ func setRedisKey(t *testing.T, server *miniredis.Miniredis, key string) {
 	if err := server.Set(key, "value"); err != nil {
 		t.Fatalf("set Redis key %q: %v", key, err)
 	}
+}
+
+type recordingRedisCleanupObserver struct {
+	abandoned int
+}
+
+func (o *recordingRedisCleanupObserver) ObserveAbandoned() {
+	o.abandoned++
 }

@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 	"github.com/mykyta-kravchenko98/Kurama/internal/controller"
@@ -83,6 +84,11 @@ func main() {
 		logger.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	redisCleanupObserver, err := controller.NewPrometheusRedisCleanupObserver(metrics.Registry)
+	if err != nil {
+		logger.Error(err, "unable to register Redis cleanup metrics")
+		os.Exit(1)
+	}
 
 	reconciler := &controller.TrafficScenarioReconciler{
 		Client:                mgr.GetClient(),
@@ -91,6 +97,8 @@ func main() {
 		RunnerImagePullSecret: runnerImagePullSecret,
 		RedisAddress:          redisAddress,
 		RedisClient:           redisClient,
+		RedisCleanupObserver:  redisCleanupObserver,
+		EventRecorder:         mgr.GetEventRecorderFor("kurama-controller"),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "unable to set up TrafficScenario controller")
