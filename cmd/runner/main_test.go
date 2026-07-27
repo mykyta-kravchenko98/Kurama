@@ -127,7 +127,7 @@ func TestNewRuntimeStateCreatesRedisBackend(t *testing.T) {
 	if err := state.Put(context.Background(), "hashes", "redis-value"); err != nil {
 		t.Fatalf("Put() error = %v", err)
 	}
-	values, err := server.List("kurama:v1:shorturl:load:scenario-uid:hashes")
+	values, err := server.List("kurama:v2:store:shorturl:load:scenario-uid:hashes")
 	if err != nil {
 		t.Fatalf("read Redis list: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestNewRuntimeStateInitializesRemovedRedisStoreTTL(t *testing.T) {
 	t.Parallel()
 
 	server := miniredis.RunT(t)
-	removedKey := "kurama:v1:shorturl:load:scenario-uid:tokens"
+	removedKey := "kurama:v2:store:shorturl:load:scenario-uid:tokens"
 	if _, err := server.Push(removedKey, "token"); err != nil {
 		t.Fatalf("create removed Redis store: %v", err)
 	}

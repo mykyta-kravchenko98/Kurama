@@ -113,6 +113,10 @@ turning it into an in-house replacement for a complete load-testing platform.
   immutable `TrafficScenario` UID. A controller finalizer stops the runner and
   removes only that UID's keys when the custom resource is deleted; suspending
   and resuming a scenario preserves its data.
+- Use the explicit `kurama:v2` key namespace with separate `store`,
+  `rate-limit` and `rate-schedule` families. The previous `kurama:v1` test
+  state is intentionally not migrated or read and can be removed once after
+  all runners use the v2 image.
 - Exported store operation counts, results and latency from the runner and
   exposed its Prometheus endpoint through the generated Deployment.
 - Added a provisioned Kurama store dashboard to `shorturl-gitops` and verified

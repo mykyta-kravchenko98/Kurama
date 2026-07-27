@@ -4,13 +4,12 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-)
 
-const redisRateLimiterKeyPrefix = "kurama:v1:rate"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
+)
 
 //go:embed acquire_rate_limit.lua
 var acquireRateLimitLua string
@@ -39,40 +38,14 @@ func NewRedisRateLimiter(client redis.UniversalClient, scope RedisRateLimiterSco
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	if err := validateRedisScope(scope.Namespace, scope.Scenario, scope.UID); err != nil {
+	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
+	if err != nil {
 		return nil, err
 	}
 	return &RedisRateLimiter{
 		client: client,
-		key: strings.Join([]string{
-			redisRateLimiterKeyPrefix,
-			scope.Namespace,
-			scope.Scenario,
-			scope.UID,
-		}, ":"),
+		key:    keyScope.RateLimitKey(),
 	}, nil
-}
-
-func validateRedisScope(namespace, scenario, uid string) error {
-	if namespace == "" {
-		return fmt.Errorf("redis scope namespace must not be empty")
-	}
-	if scenario == "" {
-		return fmt.Errorf("redis scope scenario must not be empty")
-	}
-	if uid == "" {
-		return fmt.Errorf("redis scope UID must not be empty")
-	}
-	if strings.Contains(namespace, ":") {
-		return fmt.Errorf("redis scope namespace must not contain colon")
-	}
-	if strings.Contains(scenario, ":") {
-		return fmt.Errorf("redis scope scenario must not contain colon")
-	}
-	if strings.Contains(uid, ":") {
-		return fmt.Errorf("redis scope UID must not contain colon")
-	}
-	return nil
 }
 
 func (l *RedisRateLimiter) TryAcquire(ctx context.Context, limit Limit, permits int) (Decision, error) {
