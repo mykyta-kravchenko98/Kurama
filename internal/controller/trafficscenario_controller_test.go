@@ -1113,6 +1113,60 @@ func TestValidateScenarioRejectsInvalidRunnerResources(t *testing.T) {
 			},
 			wantError: "unsupported resource",
 		},
+		{
+			name: "CPU request exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1001m"),
+				},
+			},
+			wantError: `requests["cpu"] must not exceed 1`,
+		},
+		{
+			name: "CPU limit exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			wantError: `limits["cpu"] must not exceed 1`,
+		},
+		{
+			name: "memory request exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Requests: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("513Mi"),
+				},
+			},
+			wantError: `requests["memory"] must not exceed 512Mi`,
+		},
+		{
+			name: "memory limit exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+			wantError: `limits["memory"] must not exceed 512Mi`,
+		},
+		{
+			name: "ephemeral storage request exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Requests: corev1.ResourceList{
+					corev1.ResourceEphemeralStorage: resource.MustParse("1025Mi"),
+				},
+			},
+			wantError: `requests["ephemeral-storage"] must not exceed 1Gi`,
+		},
+		{
+			name: "ephemeral storage limit exceeds maximum",
+			resources: trafficv1alpha1.RunnerResourcesSpec{
+				Limits: corev1.ResourceList{
+					corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+				},
+			},
+			wantError: `limits["ephemeral-storage"] must not exceed 1Gi`,
+		},
 	}
 
 	for _, test := range tests {
@@ -1126,6 +1180,26 @@ func TestValidateScenarioRejectsInvalidRunnerResources(t *testing.T) {
 				t.Fatalf("validateScenario() error = %v, want containing %q", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateScenarioAcceptsRunnerResourceMaximums(t *testing.T) {
+	t.Parallel()
+	scenario := &trafficv1alpha1.TrafficScenario{Spec: validScenarioSpec()}
+	maximums := corev1.ResourceList{
+		corev1.ResourceCPU:              resource.MustParse(maxRunnerCPU),
+		corev1.ResourceMemory:           resource.MustParse(maxRunnerMemory),
+		corev1.ResourceEphemeralStorage: resource.MustParse(maxRunnerEphemeralStorage),
+	}
+	scenario.Spec.Runner = &trafficv1alpha1.RunnerSpec{
+		Resources: &trafficv1alpha1.RunnerResourcesSpec{
+			Requests: maximums.DeepCopy(),
+			Limits:   maximums.DeepCopy(),
+		},
+	}
+
+	if err := validateScenario(scenario); err != nil {
+		t.Fatalf("validateScenario() error = %v", err)
 	}
 }
 

@@ -4,8 +4,15 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+)
+
+const (
+	maxRunnerCPU              = "1"
+	maxRunnerMemory           = "512Mi"
+	maxRunnerEphemeralStorage = "1Gi"
 )
 
 func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
@@ -104,8 +111,30 @@ func validateRunnerResourceList(field string, resources corev1.ResourceList) err
 				name,
 			)
 		}
+		maximum := maxRunnerResource(name)
+		if quantity.Cmp(maximum) > 0 {
+			return fmt.Errorf(
+				"spec.runner.resources.%s[%q] must not exceed %s",
+				field,
+				name,
+				maximum.String(),
+			)
+		}
 	}
 	return nil
+}
+
+func maxRunnerResource(name corev1.ResourceName) resource.Quantity {
+	switch name {
+	case corev1.ResourceCPU:
+		return resource.MustParse(maxRunnerCPU)
+	case corev1.ResourceMemory:
+		return resource.MustParse(maxRunnerMemory)
+	case corev1.ResourceEphemeralStorage:
+		return resource.MustParse(maxRunnerEphemeralStorage)
+	default:
+		panic(fmt.Sprintf("maximum requested for unsupported runner resource %q", name))
+	}
 }
 
 func isAllowedRunnerResource(name corev1.ResourceName) bool {
