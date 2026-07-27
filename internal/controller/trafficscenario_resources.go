@@ -22,8 +22,10 @@ const (
 	runnerProgressDeadlineSeconds = int32(120)
 )
 
-func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *corev1.ConfigMap {
-	config := scenarioConfigJSON(scenario)
+func desiredConfigMap(
+	scenario *trafficv1alpha1.TrafficScenario,
+	name, config string,
+) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:   scenario.Namespace,
@@ -37,11 +39,11 @@ func desiredConfigMap(scenario *trafficv1alpha1.TrafficScenario, name string) *c
 
 func desiredDeployment(
 	scenario *trafficv1alpha1.TrafficScenario,
-	name, image, imagePullSecret, redisAddress string,
+	name, image, imagePullSecret, redisAddress, config string,
 ) *appsv1.Deployment {
 	labels := labels(scenario)
 	podAnnotations := map[string]string{
-		configHashAnnotation:   configHash(scenarioConfigJSON(scenario)),
+		configHashAnnotation:   configHash(config),
 		"prometheus.io/scrape": "true",
 		"prometheus.io/port":   fmt.Sprintf("%d", runner.MetricsPort),
 		"prometheus.io/path":   runner.MetricsPath,

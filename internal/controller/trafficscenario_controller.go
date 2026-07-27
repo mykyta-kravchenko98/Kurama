@@ -118,12 +118,24 @@ func (r *TrafficScenarioReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		)
 	}
 
-	configMap := desiredConfigMap(&scenario, name)
+	config, err := scenarioConfigJSON(&scenario)
+	if err != nil {
+		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
+	}
+
+	configMap := desiredConfigMap(&scenario, name, config)
 	if err := r.applyConfigMap(ctx, &scenario, configMap); err != nil {
 		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)
 	}
 
-	deployment := desiredDeployment(&scenario, name, r.RunnerImage, r.RunnerImagePullSecret, r.RedisAddress)
+	deployment := desiredDeployment(
+		&scenario,
+		name,
+		r.RunnerImage,
+		r.RunnerImagePullSecret,
+		r.RedisAddress,
+		config,
+	)
 	deploymentChanged, err := r.applyDeployment(ctx, &scenario, deployment)
 	if err != nil {
 		return r.failed(ctx, &scenario, reasonReconcileFailed, err, true)

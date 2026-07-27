@@ -133,7 +133,14 @@ func TestReconcileDeletionStopsRunnerBeforeRedisCleanup(t *testing.T) {
 		},
 		Spec: validScenarioSpec(),
 	}
-	deployment := desiredDeployment(scenario, runnerName(scenario.Name), "example.test/kurama:test", "", "")
+	deployment := desiredDeployment(
+		scenario,
+		runnerName(scenario.Name),
+		"example.test/kurama:test",
+		"",
+		"",
+		mustScenarioConfigJSON(t, scenario),
+	)
 	if err := controllerutil.SetControllerReference(scenario, deployment, scheme); err != nil {
 		t.Fatalf("set runner Deployment owner: %v", err)
 	}

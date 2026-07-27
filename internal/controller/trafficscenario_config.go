@@ -128,9 +128,12 @@ func rateProfileDelayDivisor(scenario *trafficv1alpha1.TrafficScenario) int {
 	return scenario.Spec.Rate.Profile.DelayDivisor
 }
 
-func scenarioConfigJSON(scenario *trafficv1alpha1.TrafficScenario) string {
-	data, _ := json.Marshal(scenarioRunnerConfig(scenario))
-	return string(data)
+func scenarioConfigJSON(scenario *trafficv1alpha1.TrafficScenario) (string, error) {
+	data, err := json.Marshal(scenarioRunnerConfig(scenario))
+	if err != nil {
+		return "", fmt.Errorf("marshal runner configuration: %w", err)
+	}
+	return string(data), nil
 }
 
 func configHash(config string) string {
