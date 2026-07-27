@@ -17,15 +17,6 @@ const (
 	redisStoreScanPageSize = 100
 )
 
-// RedisStoreScope isolates values belonging to one TrafficScenario. Kubernetes
-// metadata is supplied by the runner wiring rather than repeated in every
-// store declaration.
-type RedisStoreScope struct {
-	Namespace string
-	Scenario  string
-	UID       string
-}
-
 // RedisStore keeps bounded value pools in Redis so runner replicas can share
 // captured values and preserve them across Pod restarts.
 type RedisStore struct {
@@ -36,33 +27,22 @@ type RedisStore struct {
 
 var _ ValueStore = (*RedisStore)(nil)
 
-func NewRedisStore(client redis.UniversalClient, scope RedisStoreScope, configs []StoreConfig) (*RedisStore, error) {
+func NewRedisStore(client redis.UniversalClient, scope rediskey.Scope, configs []StoreConfig) (*RedisStore, error) {
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	validated, err := validateStoreConfigs(configs)
 	if err != nil {
 		return nil, err
 	}
 
-	limits := make(map[string]int, len(configs))
-	for i, config := range configs {
-		if err := validateName(config.Name); err != nil {
-			return nil, fmt.Errorf("stores[%d].name: %w", i, err)
-		}
-		if config.Capacity < 1 || config.Capacity > MaxStoreCapacity {
-			return nil, fmt.Errorf("stores[%d].capacity must be between 1 and %d", i, MaxStoreCapacity)
-		}
-		if _, exists := limits[config.Name]; exists {
-			return nil, fmt.Errorf("stores[%d].name %q is duplicated", i, config.Name)
-		}
-		limits[config.Name] = config.Capacity
-	}
-
 	return &RedisStore{
 		client:    client,
-		keyPrefix: keyScope.StorePrefix(),
-		limits:    limits,
+		keyPrefix: scope.StorePrefix(),
+		limits:    validated.capacities,
 	}, nil
 }
 

@@ -10,6 +10,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
 )
 
 func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
@@ -24,7 +26,7 @@ func TestRedisRateLimiterSharesBudgetBetweenInstances(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
+	scope := newTestRedisRateLimiterScope(t, "scenario-uid")
 	first := newTestRedisRateLimiter(t, firstClient, scope)
 	second := newTestRedisRateLimiter(t, secondClient, scope)
 	limit := Limit{Requests: 3, Window: time.Minute}
@@ -73,7 +75,7 @@ func TestRedisRateLimiterPartiallyGrantsBatchAcrossInstances(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
+	scope := newTestRedisRateLimiterScope(t, "scenario-uid")
 	first := newTestRedisRateLimiter(t, firstClient, scope)
 	second := newTestRedisRateLimiter(t, secondClient, scope)
 	limit := Limit{Requests: 5, Window: time.Minute}
@@ -115,7 +117,7 @@ func TestRedisRateLimiterDoesNotExceedSharedBudgetConcurrently(t *testing.T) {
 		}
 	})
 
-	scope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
+	scope := newTestRedisRateLimiterScope(t, "scenario-uid")
 	limiters := []*RedisRateLimiter{
 		newTestRedisRateLimiter(t, firstClient, scope),
 		newTestRedisRateLimiter(t, secondClient, scope),
@@ -152,8 +154,8 @@ func TestRedisRateLimiterDoesNotExceedSharedBudgetConcurrently(t *testing.T) {
 func TestRedisRateLimiterKeepsScenariosIndependent(t *testing.T) {
 	t.Parallel()
 	_, client := newTestRedis(t)
-	first := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "first-uid"})
-	second := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "second-uid"})
+	first := newTestRedisRateLimiter(t, client, newTestRedisRateLimiterScope(t, "first-uid"))
+	second := newTestRedisRateLimiter(t, client, newTestRedisRateLimiterScope(t, "second-uid"))
 	limit := Limit{Requests: 1, Window: time.Minute}
 
 	for name, limiter := range map[string]*RedisRateLimiter{"first": first, "second": second} {
@@ -170,7 +172,7 @@ func TestRedisRateLimiterKeepsScenariosIndependent(t *testing.T) {
 func TestRedisRateLimiterReportsValidationCancellationAndRedisErrors(t *testing.T) {
 	t.Parallel()
 	server, client := newTestRedis(t)
-	limiter := newTestRedisRateLimiter(t, client, RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"})
+	limiter := newTestRedisRateLimiter(t, client, newTestRedisRateLimiterScope(t, "scenario-uid"))
 
 	if _, err := limiter.TryAcquire(context.Background(), Limit{}, 1); err == nil {
 		t.Fatal("invalid limit error = nil")
@@ -189,36 +191,20 @@ func TestRedisRateLimiterReportsValidationCancellationAndRedisErrors(t *testing.
 
 func TestNewRedisRateLimiterValidatesConfiguration(t *testing.T) {
 	t.Parallel()
-	_, client := newTestRedis(t)
-	validScope := RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario-uid"}
-	tests := []struct {
-		name   string
-		client redis.UniversalClient
-		scope  RedisRateLimiterScope
-	}{
-		{name: "nil client", scope: validScope},
-		{name: "empty namespace", client: client, scope: RedisRateLimiterScope{Scenario: "load", UID: "scenario-uid"}},
-		{name: "empty scenario", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", UID: "scenario-uid"}},
-		{name: "empty UID", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load"}},
-		{name: "namespace colon", client: client, scope: RedisRateLimiterScope{Namespace: "short:url", Scenario: "load", UID: "scenario-uid"}},
-		{name: "scenario colon", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "lo:ad", UID: "scenario-uid"}},
-		{name: "UID colon", client: client, scope: RedisRateLimiterScope{Namespace: "shorturl", Scenario: "load", UID: "scenario:uid"}},
+	validScope := newTestRedisRateLimiterScope(t, "scenario-uid")
+	if _, err := NewRedisRateLimiter(nil, validScope); err == nil {
+		t.Fatal("NewRedisRateLimiter() error = nil")
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := NewRedisRateLimiter(test.client, test.scope); err == nil {
-				t.Fatal("NewRedisRateLimiter() error = nil")
-			}
-		})
+	_, client := newTestRedis(t)
+	if _, err := NewRedisRateLimiter(client, rediskey.Scope{}); err == nil {
+		t.Fatal("NewRedisRateLimiter() with invalid scope error = nil")
 	}
 }
 
 func newTestRedisRateLimiter(
 	t *testing.T,
 	client redis.UniversalClient,
-	scope RedisRateLimiterScope,
+	scope rediskey.Scope,
 ) *RedisRateLimiter {
 	t.Helper()
 	limiter, err := NewRedisRateLimiter(client, scope)
@@ -226,6 +212,15 @@ func newTestRedisRateLimiter(
 		t.Fatalf("NewRedisRateLimiter() error = %v", err)
 	}
 	return limiter
+}
+
+func newTestRedisRateLimiterScope(t *testing.T, uid string) rediskey.Scope {
+	t.Helper()
+	scope, err := rediskey.NewScope("shorturl", "load", uid)
+	if err != nil {
+		t.Fatalf("rediskey.NewScope() error = %v", err)
+	}
+	return scope
 }
 
 func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {

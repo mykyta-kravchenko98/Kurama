@@ -56,3 +56,10 @@ func TestNewScopeRejectsInvalidComponents(t *testing.T) {
 		})
 	}
 }
+
+func TestScopeValidateRejectsZeroValue(t *testing.T) {
+	t.Parallel()
+	if err := (Scope{}).Validate(); err == nil {
+		t.Fatal("Scope{}.Validate() error = nil")
+	}
+}

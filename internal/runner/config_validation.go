@@ -24,22 +24,9 @@ func (c Config) Validate() error {
 	if err := validateRateProfile(c.Rate.Profile); err != nil {
 		return err
 	}
-	if len(c.Stores) > MaxStores {
-		return fmt.Errorf("stores must contain at most %d entries", MaxStores)
-	}
-
-	stores := make(map[string]struct{}, len(c.Stores))
-	for i, store := range c.Stores {
-		if err := validateName(store.Name); err != nil {
-			return fmt.Errorf("stores[%d].name: %w", i, err)
-		}
-		if _, exists := stores[store.Name]; exists {
-			return fmt.Errorf("stores[%d].name %q is duplicated", i, store.Name)
-		}
-		if store.Capacity < 1 || store.Capacity > MaxStoreCapacity {
-			return fmt.Errorf("stores[%d].capacity must be between 1 and %d", i, MaxStoreCapacity)
-		}
-		stores[store.Name] = struct{}{}
+	stores, err := validateStoreConfigs(c.Stores)
+	if err != nil {
+		return err
 	}
 
 	if len(c.Operations) == 0 || len(c.Operations) > MaxOperations {
@@ -47,7 +34,7 @@ func (c Config) Validate() error {
 	}
 	operationNames := make(map[string]struct{}, len(c.Operations))
 	for i, operation := range c.Operations {
-		if err := validateOperation(operation, stores); err != nil {
+		if err := validateOperation(operation, stores.names); err != nil {
 			return fmt.Errorf("operations[%d]: %w", i, err)
 		}
 		if _, exists := operationNames[operation.Name]; exists {

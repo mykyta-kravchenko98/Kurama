@@ -16,14 +16,6 @@ var acquireRateLimitLua string
 
 var acquireRateLimitScript = redis.NewScript(acquireRateLimitLua)
 
-// RedisRateLimiterScope isolates the shared request budget belonging to one
-// TrafficScenario.
-type RedisRateLimiterScope struct {
-	Namespace string
-	Scenario  string
-	UID       string
-}
-
 // RedisRateLimiter atomically shares one fixed-window request budget between
 // all runner replicas of a TrafficScenario. Redis TIME defines window
 // boundaries so Pod clock skew cannot create independent budgets.
@@ -34,17 +26,16 @@ type RedisRateLimiter struct {
 
 var _ Limiter = (*RedisRateLimiter)(nil)
 
-func NewRedisRateLimiter(client redis.UniversalClient, scope RedisRateLimiterScope) (*RedisRateLimiter, error) {
+func NewRedisRateLimiter(client redis.UniversalClient, scope rediskey.Scope) (*RedisRateLimiter, error) {
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
-	if err != nil {
+	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
 	return &RedisRateLimiter{
 		client: client,
-		key:    keyScope.RateLimitKey(),
+		key:    scope.RateLimitKey(),
 	}, nil
 }
 
