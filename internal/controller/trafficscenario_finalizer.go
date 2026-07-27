@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
 )
 
 const (
@@ -74,11 +74,11 @@ func (r *TrafficScenarioReconciler) reconcileDeletion(
 			fmt.Errorf("redis client is unavailable for TrafficScenario cleanup"),
 		)
 	}
-	if err := deleteScenarioRedisKeys(ctx, r.RedisClient, redisCleanupScope{
-		Namespace: scenario.Namespace,
-		Scenario:  scenario.Name,
-		UID:       string(scenario.UID),
-	}); err != nil {
+	keyScope, err := rediskey.NewScope(scenario.Namespace, scenario.Name, string(scenario.UID))
+	if err != nil {
+		return r.retryOrAbandonCleanup(ctx, scenario, err)
+	}
+	if err := deleteScenarioRedisKeys(ctx, r.RedisClient, keyScope); err != nil {
 		return r.retryOrAbandonCleanup(ctx, scenario, err)
 	}
 
@@ -149,31 +149,17 @@ func redisCleanupGracePeriodExpired(scenario *trafficv1alpha1.TrafficScenario) b
 	return !time.Now().Before(scenario.DeletionTimestamp.Add(redisCleanupGracePeriod))
 }
 
-type redisCleanupScope struct {
-	Namespace string
-	Scenario  string
-	UID       string
-}
-
 func deleteScenarioRedisKeys(
 	ctx context.Context,
 	redisClient redis.UniversalClient,
-	scope redisCleanupScope,
+	scope rediskey.Scope,
 ) error {
-	if err := validateRedisCleanupScope(scope); err != nil {
-		return err
-	}
 	if redisClient == nil {
 		return fmt.Errorf("redis client must not be nil")
 	}
 
-	patterns := []string{
-		strings.Join([]string{"kurama:v1", scope.Namespace, scope.Scenario, scope.UID, "*"}, ":"),
-		strings.Join([]string{"kurama:v1:rate", scope.Namespace, scope.Scenario, scope.UID}, ":"),
-		strings.Join([]string{"kurama:v1:rate-schedule", scope.Namespace, scope.Scenario, scope.UID, "*"}, ":"),
-	}
 	keys := make([]string, 0)
-	for _, pattern := range patterns {
+	for _, pattern := range scope.CleanupPatterns() {
 		iterator := redisClient.Scan(ctx, 0, pattern, redisCleanupScanCount).Iterator()
 		for iterator.Next(ctx) {
 			keys = append(keys, iterator.Val())
@@ -187,22 +173,6 @@ func deleteScenarioRedisKeys(
 	}
 	if err := redisClient.Del(ctx, keys...).Err(); err != nil {
 		return fmt.Errorf("delete Redis keys for TrafficScenario cleanup: %w", err)
-	}
-	return nil
-}
-
-func validateRedisCleanupScope(scope redisCleanupScope) error {
-	for name, value := range map[string]string{
-		"namespace": scope.Namespace,
-		"scenario":  scope.Scenario,
-		"UID":       scope.UID,
-	} {
-		if value == "" {
-			return fmt.Errorf("redis cleanup scope %s must not be empty", name)
-		}
-		if strings.Contains(value, ":") {
-			return fmt.Errorf("redis cleanup scope %s must not contain colon", name)
-		}
 	}
 	return nil
 }

@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
 )
 
 const (
-	redisStoreKeyPrefix    = "kurama:v1"
 	redisRemovedStoreTTL   = 7 * 24 * time.Hour
 	redisStoreScanPageSize = 100
 )
@@ -39,7 +40,8 @@ func NewRedisStore(client redis.UniversalClient, scope RedisStoreScope, configs 
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	if err := validateRedisScope(scope); err != nil {
+	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -59,7 +61,7 @@ func NewRedisStore(client redis.UniversalClient, scope RedisStoreScope, configs 
 
 	return &RedisStore{
 		client:    client,
-		keyPrefix: strings.Join([]string{redisStoreKeyPrefix, scope.Namespace, scope.Scenario, scope.UID}, ":"),
+		keyPrefix: keyScope.StorePrefix(),
 		limits:    limits,
 	}, nil
 }
@@ -157,26 +159,4 @@ func (s *RedisStore) ReconcileKeys(ctx context.Context) error {
 
 func (s *RedisStore) key(store string) string {
 	return s.keyPrefix + ":" + store
-}
-
-func validateRedisScope(scope RedisStoreScope) error {
-	if scope.Namespace == "" {
-		return fmt.Errorf("redis scope namespace must not be empty")
-	}
-	if scope.Scenario == "" {
-		return fmt.Errorf("redis scope scenario must not be empty")
-	}
-	if scope.UID == "" {
-		return fmt.Errorf("redis scope UID must not be empty")
-	}
-	if strings.Contains(scope.Namespace, ":") {
-		return fmt.Errorf("redis scope namespace must not contain colon")
-	}
-	if strings.Contains(scope.Scenario, ":") {
-		return fmt.Errorf("redis scope scenario must not contain colon")
-	}
-	if strings.Contains(scope.UID, ":") {
-		return fmt.Errorf("redis scope UID must not contain colon")
-	}
-	return nil
 }

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-)
 
-const redisUniformKeyPrefix = "kurama:v1:rate-schedule"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
+)
 
 //go:embed select_uniform_window.lua
 var selectUniformWindowLua string
@@ -69,7 +69,8 @@ func newRedisUniform(
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	if err := validateRedisUniformScope(scope); err != nil {
+	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
+	if err != nil {
 		return nil, err
 	}
 	if config.MinRequestsPerMinute < 1 {
@@ -91,10 +92,7 @@ func newRedisUniform(
 	return &RedisUniform{
 		client: client,
 		key: strings.Join([]string{
-			redisUniformKeyPrefix,
-			scope.Namespace,
-			scope.Scenario,
-			scope.UID,
+			keyScope.RateSchedulePrefix(),
 			strconv.Itoa(config.MinRequestsPerMinute),
 			strconv.Itoa(config.MaxRequestsPerMinute),
 			strconv.FormatInt(config.Window.Microseconds(), 10),
@@ -122,28 +120,6 @@ func (s *RedisUniform) RequestsPerMinute(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("select Redis rate schedule value: %w", err)
 	}
 	return selected, nil
-}
-
-func validateRedisUniformScope(scope RedisUniformScope) error {
-	if scope.Namespace == "" {
-		return fmt.Errorf("redis schedule namespace must not be empty")
-	}
-	if scope.Scenario == "" {
-		return fmt.Errorf("redis schedule scenario must not be empty")
-	}
-	if scope.UID == "" {
-		return fmt.Errorf("redis schedule UID must not be empty")
-	}
-	if strings.Contains(scope.Namespace, ":") {
-		return fmt.Errorf("redis schedule namespace must not contain colon")
-	}
-	if strings.Contains(scope.Scenario, ":") {
-		return fmt.Errorf("redis schedule scenario must not contain colon")
-	}
-	if strings.Contains(scope.UID, ":") {
-		return fmt.Errorf("redis schedule UID must not contain colon")
-	}
-	return nil
 }
 
 type globalIntegerRandomSource struct{}

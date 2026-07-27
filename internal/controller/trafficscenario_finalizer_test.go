@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
+	"github.com/mykyta-kravchenko98/Kurama/internal/runner/rediskey"
 )
 
 func TestDeleteScenarioRedisKeysOnlyDeletesMatchingUID(t *testing.T) {
@@ -31,25 +32,25 @@ func TestDeleteScenarioRedisKeysOnlyDeletesMatchingUID(t *testing.T) {
 	}()
 
 	matchingKeys := []string{
-		"kurama:v1:shorturl:load:old-uid:hashes",
-		"kurama:v1:rate:shorturl:load:old-uid",
-		"kurama:v1:rate-schedule:shorturl:load:old-uid:2:128:60000000",
+		"kurama:v2:store:shorturl:load:old-uid:hashes",
+		"kurama:v2:rate-limit:shorturl:load:old-uid",
+		"kurama:v2:rate-schedule:shorturl:load:old-uid:2:128:60000000",
 	}
 	preservedKeys := []string{
-		"kurama:v1:shorturl:load:new-uid:hashes",
-		"kurama:v1:rate:shorturl:load:new-uid",
-		"kurama:v1:rate-schedule:shorturl:load:new-uid:2:128:60000000",
-		"kurama:v1:other:load:old-uid:hashes",
+		"kurama:v2:store:shorturl:load:new-uid:hashes",
+		"kurama:v2:rate-limit:shorturl:load:new-uid",
+		"kurama:v2:rate-schedule:shorturl:load:new-uid:2:128:60000000",
+		"kurama:v2:store:other:load:old-uid:hashes",
 	}
 	for _, key := range append(matchingKeys, preservedKeys...) {
 		setRedisKey(t, server, key)
 	}
 
-	if err := deleteScenarioRedisKeys(context.Background(), redisClient, redisCleanupScope{
-		Namespace: "shorturl",
-		Scenario:  "load",
-		UID:       "old-uid",
-	}); err != nil {
+	if err := deleteScenarioRedisKeys(
+		context.Background(),
+		redisClient,
+		mustRedisKeyScope(t, "shorturl", "load", "old-uid"),
+	); err != nil {
 		t.Fatalf("deleteScenarioRedisKeys() error = %v", err)
 	}
 	for _, key := range matchingKeys {
@@ -81,7 +82,7 @@ func TestReconcileDeletionCleansRedisAndRemovesFinalizer(t *testing.T) {
 		Spec: validScenarioSpec(),
 	}
 	server := miniredis.RunT(t)
-	setRedisKey(t, server, "kurama:v1:shorturl:shorturl:scenario-uid:hashes")
+	setRedisKey(t, server, "kurama:v2:store:shorturl:shorturl:scenario-uid:hashes")
 	redisClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer func() {
 		if err := redisClient.Close(); err != nil {
@@ -102,7 +103,7 @@ func TestReconcileDeletionCleansRedisAndRemovesFinalizer(t *testing.T) {
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scenario)}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if server.Exists("kurama:v1:shorturl:shorturl:scenario-uid:hashes") {
+	if server.Exists("kurama:v2:store:shorturl:shorturl:scenario-uid:hashes") {
 		t.Fatal("scenario Redis key still exists")
 	}
 
@@ -137,7 +138,7 @@ func TestReconcileDeletionStopsRunnerBeforeRedisCleanup(t *testing.T) {
 		t.Fatalf("set runner Deployment owner: %v", err)
 	}
 	server := miniredis.RunT(t)
-	key := "kurama:v1:shorturl:shorturl:scenario-uid:hashes"
+	key := "kurama:v2:store:shorturl:shorturl:scenario-uid:hashes"
 	setRedisKey(t, server, key)
 	redisClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer func() {
@@ -275,7 +276,7 @@ func TestSuspendedScenarioKeepsRedisCleanupFinalizer(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	server := miniredis.RunT(t)
-	key := "kurama:v1:shorturl:shorturl:scenario-uid:hashes"
+	key := "kurama:v2:store:shorturl:shorturl:scenario-uid:hashes"
 	setRedisKey(t, server, key)
 	redisClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer func() {
@@ -325,6 +326,15 @@ func setRedisKey(t *testing.T, server *miniredis.Miniredis, key string) {
 	if err := server.Set(key, "value"); err != nil {
 		t.Fatalf("set Redis key %q: %v", key, err)
 	}
+}
+
+func mustRedisKeyScope(t *testing.T, namespace, scenario, uid string) rediskey.Scope {
+	t.Helper()
+	scope, err := rediskey.NewScope(namespace, scenario, uid)
+	if err != nil {
+		t.Fatalf("rediskey.NewScope() error = %v", err)
+	}
+	return scope
 }
 
 type recordingRedisCleanupObserver struct {
