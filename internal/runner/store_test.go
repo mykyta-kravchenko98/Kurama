@@ -101,6 +101,10 @@ func TestMemoryStoreRejectsEmptyValueAndCancelledContext(t *testing.T) {
 
 func TestNewMemoryStoreValidatesConfiguration(t *testing.T) {
 	t.Parallel()
+	tooManyStores := make([]StoreConfig, MaxStores+1)
+	for i := range tooManyStores {
+		tooManyStores[i] = StoreConfig{Name: fmt.Sprintf("store-%d", i), Capacity: 1}
+	}
 	tests := []struct {
 		name    string
 		configs []StoreConfig
@@ -108,6 +112,7 @@ func TestNewMemoryStoreValidatesConfiguration(t *testing.T) {
 		{name: "invalid name", configs: []StoreConfig{{Name: "Invalid", Capacity: 1}}},
 		{name: "invalid capacity", configs: []StoreConfig{{Name: "hashes", Capacity: 0}}},
 		{name: "duplicate", configs: []StoreConfig{{Name: "hashes", Capacity: 1}, {Name: "hashes", Capacity: 2}}},
+		{name: "too many stores", configs: tooManyStores},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -35,19 +35,14 @@ type memoryPool struct {
 }
 
 func NewMemoryStore(configs []StoreConfig) (*MemoryStore, error) {
-	store := &MemoryStore{stores: make(map[string]*memoryPool, len(configs))}
-	for i, config := range configs {
-		if err := validateName(config.Name); err != nil {
-			return nil, fmt.Errorf("stores[%d].name: %w", i, err)
-		}
-		if config.Capacity < 1 || config.Capacity > MaxStoreCapacity {
-			return nil, fmt.Errorf("stores[%d].capacity must be between 1 and %d", i, MaxStoreCapacity)
-		}
-		if _, exists := store.stores[config.Name]; exists {
-			return nil, fmt.Errorf("stores[%d].name %q is duplicated", i, config.Name)
-		}
-		store.stores[config.Name] = &memoryPool{
-			limit: config.Capacity,
+	validated, err := validateStoreConfigs(configs)
+	if err != nil {
+		return nil, err
+	}
+	store := &MemoryStore{stores: make(map[string]*memoryPool, len(validated.capacities))}
+	for name, capacity := range validated.capacities {
+		store.stores[name] = &memoryPool{
+			limit: capacity,
 		}
 	}
 	return store, nil

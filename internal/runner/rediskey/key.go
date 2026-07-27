@@ -25,19 +25,29 @@ type Scope struct {
 
 // NewScope validates the key components and returns an immutable scope.
 func NewScope(namespace, scenario, uid string) (Scope, error) {
+	scope := Scope{namespace: namespace, scenario: scenario, uid: uid}
+	if err := scope.Validate(); err != nil {
+		return Scope{}, err
+	}
+	return scope, nil
+}
+
+// Validate rejects the zero value and any scope that cannot be encoded
+// unambiguously into Kurama's colon-delimited Redis key format.
+func (s Scope) Validate() error {
 	for name, value := range map[string]string{
-		"namespace": namespace,
-		"scenario":  scenario,
-		"UID":       uid,
+		"namespace": s.namespace,
+		"scenario":  s.scenario,
+		"UID":       s.uid,
 	} {
 		if value == "" {
-			return Scope{}, fmt.Errorf("redis scope %s must not be empty", name)
+			return fmt.Errorf("redis scope %s must not be empty", name)
 		}
 		if strings.Contains(value, separator) {
-			return Scope{}, fmt.Errorf("redis scope %s must not contain colon", name)
+			return fmt.Errorf("redis scope %s must not contain colon", name)
 		}
 	}
-	return Scope{namespace: namespace, scenario: scenario, uid: uid}, nil
+	return nil
 }
 
 // StorePrefix returns the prefix shared by all named value stores.

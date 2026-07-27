@@ -19,13 +19,6 @@ var selectUniformWindowLua string
 
 var selectUniformWindowScript = redis.NewScript(selectUniformWindowLua)
 
-// RedisUniformScope isolates a schedule belonging to one TrafficScenario.
-type RedisUniformScope struct {
-	Namespace string
-	Scenario  string
-	UID       string
-}
-
 // RedisUniformConfig defines the inclusive RPM range and window duration.
 type RedisUniformConfig struct {
 	MinRequestsPerMinute int
@@ -54,7 +47,7 @@ type integerRandomSource interface {
 // NewRedisUniform creates a Redis-coordinated uniform window schedule.
 func NewRedisUniform(
 	client redis.UniversalClient,
-	scope RedisUniformScope,
+	scope rediskey.Scope,
 	config RedisUniformConfig,
 ) (*RedisUniform, error) {
 	return newRedisUniform(client, scope, config, globalIntegerRandomSource{})
@@ -62,15 +55,14 @@ func NewRedisUniform(
 
 func newRedisUniform(
 	client redis.UniversalClient,
-	scope RedisUniformScope,
+	scope rediskey.Scope,
 	config RedisUniformConfig,
 	random integerRandomSource,
 ) (*RedisUniform, error) {
 	if client == nil {
 		return nil, fmt.Errorf("redis client must not be nil")
 	}
-	keyScope, err := rediskey.NewScope(scope.Namespace, scope.Scenario, scope.UID)
-	if err != nil {
+	if err := scope.Validate(); err != nil {
 		return nil, err
 	}
 	if config.MinRequestsPerMinute < 1 {
@@ -92,7 +84,7 @@ func newRedisUniform(
 	return &RedisUniform{
 		client: client,
 		key: strings.Join([]string{
-			keyScope.RateSchedulePrefix(),
+			scope.RateSchedulePrefix(),
 			strconv.Itoa(config.MinRequestsPerMinute),
 			strconv.Itoa(config.MaxRequestsPerMinute),
 			strconv.FormatInt(config.Window.Microseconds(), 10),
