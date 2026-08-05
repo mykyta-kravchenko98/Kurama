@@ -78,7 +78,10 @@ func newRuntimeState(
 		return nil, fmt.Errorf("rate limiter backend %q is unsupported; use local or redis", limiterBackend)
 	}
 
-	var client *redis.Client
+	// Keep the optional client as a nil interface until Redis is actually
+	// required. Assigning a nil *redis.Client to redis.UniversalClient would
+	// produce a non-nil interface and make readiness call Ping on a nil pointer.
+	var client redis.UniversalClient
 	var keyScope rediskey.Scope
 	closeState := func() error { return nil }
 	if storeBackend == "redis" || limiterBackend == "redis" || scheduleConfig.Type == "uniform" {

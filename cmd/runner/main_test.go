@@ -446,6 +446,33 @@ func TestMetricsServerReadinessTracksRedis(t *testing.T) {
 	assertHTTPStatus(t, client, readinessURL, http.StatusOK)
 }
 
+func TestRuntimeStateReadyWithoutRedis(t *testing.T) {
+	t.Parallel()
+
+	state, err := newRuntimeState(
+		context.Background(),
+		storeSettings{Backend: "memory"},
+		"local",
+		fixedScheduleConfig(30),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newRuntimeState() error = %v", err)
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	if state.redis != nil {
+		t.Fatalf("Redis client = %#v, want nil when Redis is not used", state.redis)
+	}
+	if err := state.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready() error = %v", err)
+	}
+}
+
 func TestNewRedisClientUsesBoundedTimeoutsAndRetries(t *testing.T) {
 	t.Parallel()
 
