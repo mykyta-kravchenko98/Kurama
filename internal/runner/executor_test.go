@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,7 +93,7 @@ func TestExecutorRejectsOversizedResponse(t *testing.T) {
 	defer server.Close()
 
 	executor := newTestExecutor(t, server, nil)
-	_, err := executor.Execute(context.Background(), simpleGETOperation(http.StatusOK))
+	_, err := executor.Execute(context.Background(), simpleGETOperation())
 	if !errors.Is(err, ErrResponseBodyTooLarge) {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -105,7 +107,7 @@ func TestExecutorReportsUnexpectedStatus(t *testing.T) {
 	defer server.Close()
 
 	executor := newTestExecutor(t, server, nil)
-	result, err := executor.Execute(context.Background(), simpleGETOperation(http.StatusOK))
+	result, err := executor.Execute(context.Background(), simpleGETOperation())
 	if !errors.Is(err, ErrUnexpectedStatus) || result.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("result = %#v, error = %v", result, err)
 	}
@@ -145,6 +147,64 @@ func TestExecutorEscapesPathVariable(t *testing.T) {
 	}
 }
 
+func TestExecutorReadsSecretHeaderForEachRequest(t *testing.T) {
+	t.Parallel()
+	secretFile := filepath.Join(t.TempDir(), "authorization")
+	if err := os.WriteFile(secretFile, []byte("Bearer first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := atomic.Value{}
+	want.Store("Bearer first")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Authorization"); got != want.Load().(string) {
+			t.Errorf("Authorization = %q, want %q", got, want.Load())
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	executor := newTestExecutor(t, server, nil)
+	operation := simpleGETOperation()
+	operation.Request.SecretHeaders = []SecretHeaderConfig{{
+		Name: "Authorization", ValueFile: secretFile,
+	}}
+	if _, err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatalf("first Execute() error: %v", err)
+	}
+
+	want.Store("Bearer rotated")
+	if err := os.WriteFile(secretFile, []byte("Bearer rotated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatalf("second Execute() error: %v", err)
+	}
+}
+
+func TestExecutorSecretHeaderErrorDoesNotLeakValue(t *testing.T) {
+	t.Parallel()
+	secretFile := filepath.Join(t.TempDir(), "authorization")
+	const secret = "must-not-appear-in-error"
+	if err := os.WriteFile(secretFile, []byte(secret+"\ninvalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewExecutor(TargetConfig{BaseURL: "http://example.invalid"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := simpleGETOperation()
+	operation.Request.SecretHeaders = []SecretHeaderConfig{{
+		Name: "Authorization", ValueFile: secretFile,
+	}}
+	_, err = executor.Execute(context.Background(), operation)
+	if err == nil || !strings.Contains(err.Error(), "line break") {
+		t.Fatalf("Execute() error = %v, want line-break rejection", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Execute() error leaked secret value: %v", err)
+	}
+}
+
 func TestCaptureJSONStringSupportsArrayAndEscapedTokens(t *testing.T) {
 	t.Parallel()
 	value, err := captureJSONString([]byte(`{"items":[{"a/b":"ok"}]}`), "/items/0/a~1b")
@@ -170,11 +230,11 @@ func newTestExecutor(t *testing.T, server *httptest.Server, store ValueStore) *E
 	return executor
 }
 
-func simpleGETOperation(expectedStatus int) OperationConfig {
+func simpleGETOperation() OperationConfig {
 	return OperationConfig{
 		Name: "get", Weight: 1,
 		Request:             RequestConfig{Method: http.MethodGet, PathTemplate: "/get"},
-		ExpectedStatusCodes: []int{expectedStatus},
+		ExpectedStatusCodes: []int{http.StatusOK},
 	}
 }
 

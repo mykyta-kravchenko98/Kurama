@@ -473,6 +473,24 @@ func TestRuntimeStateReadyWithoutRedis(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateReadinessChecksSecretHeaderFiles(t *testing.T) {
+	t.Parallel()
+	secretFile := filepath.Join(t.TempDir(), "authorization")
+	state := &runtimeState{
+		secretHeaderFiles: []string{secretFile},
+		close:             func() error { return nil },
+	}
+	if err := state.Ready(context.Background()); err == nil {
+		t.Fatal("Ready() error = nil for missing projected credential")
+	}
+	if err := os.WriteFile(secretFile, []byte("Bearer ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready() error = %v after projected credential appeared", err)
+	}
+}
+
 func TestNewRedisClientUsesBoundedTimeoutsAndRetries(t *testing.T) {
 	t.Parallel()
 

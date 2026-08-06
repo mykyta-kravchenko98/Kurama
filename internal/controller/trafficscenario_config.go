@@ -81,10 +81,20 @@ func scenarioRunnerConfig(scenario *trafficv1alpha1.TrafficScenario) runner.Conf
 				Method:       operation.Request.Method,
 				PathTemplate: operation.Request.PathTemplate,
 				Headers:      operation.Request.Headers,
+				SecretHeaders: make(
+					[]runner.SecretHeaderConfig,
+					len(operation.Request.SecretHeaders),
+				),
 				BodyTemplate: operation.Request.BodyTemplate,
 				Variables:    make([]runner.VariableConfig, len(operation.Request.Variables)),
 			},
 			ExpectedStatusCodes: operation.ExpectedStatusCodes,
+		}
+		for j, header := range operation.Request.SecretHeaders {
+			converted.Request.SecretHeaders[j] = runner.SecretHeaderConfig{
+				Name:      header.Name,
+				ValueFile: secretHeaderFilePath(i, j),
+			}
 		}
 		for j, variable := range operation.Request.Variables {
 			converted.Request.Variables[j] = runner.VariableConfig{

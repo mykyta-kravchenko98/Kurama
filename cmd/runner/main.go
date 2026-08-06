@@ -52,6 +52,7 @@ func runWithMetricsAddress(
 	if err != nil {
 		return fmt.Errorf("create runner state: %w", err)
 	}
+	state.secretHeaderFiles = config.SecretHeaderFiles()
 	defer func() {
 		if err := state.Close(); err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("close runner state: %w", err))

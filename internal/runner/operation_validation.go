@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"net/http"
+	pathpkg "path"
 	"regexp"
 	"strings"
 )
@@ -35,7 +36,7 @@ func validateOperation(operation OperationConfig, stores map[string]struct{}) er
 	if operation.Request.Method == http.MethodGet && operation.Request.BodyTemplate != "" {
 		return fmt.Errorf("GET request must not define bodyTemplate")
 	}
-	if err := validateHeaders(operation.Request.Headers); err != nil {
+	if err := validateHeaders(operation.Request.Headers, operation.Request.SecretHeaders); err != nil {
 		return err
 	}
 	if len(operation.ExpectedStatusCodes) == 0 {
@@ -89,14 +90,15 @@ func validateOperation(operation OperationConfig, stores map[string]struct{}) er
 	return nil
 }
 
-func validateHeaders(headers map[string]string) error {
+func validateHeaders(headers map[string]string, secretHeaders []SecretHeaderConfig) error {
+	seen := make(map[string]struct{}, len(headers)+len(secretHeaders))
 	for name, value := range headers {
-		if name == "" || strings.ContainsAny(name, " \t\r\n:") {
+		if !validHeaderName(name) {
 			return fmt.Errorf("request.headers contains invalid header name %q", name)
 		}
 		if isSensitiveHeader(name) {
 			return fmt.Errorf(
-				"request.headers must not contain sensitive header %q; SecretRef support is not available",
+				"request.headers must not contain sensitive header %q; use request.secretHeaders",
 				name,
 			)
 		}
@@ -106,12 +108,56 @@ func validateHeaders(headers map[string]string) error {
 		if strings.Contains(value, "{{") || strings.Contains(value, "}}") {
 			return fmt.Errorf("request.headers[%q] templates are unsupported in Phase 2", name)
 		}
-		switch strings.ToLower(name) {
-		case "host", "content-length", "transfer-encoding", "connection":
+		canonicalName := strings.ToLower(name)
+		if isTransportHeader(canonicalName) {
 			return fmt.Errorf("request.headers must not set transport header %q", name)
+		}
+		seen[canonicalName] = struct{}{}
+	}
+	if len(secretHeaders) > MaxSecretHeaders {
+		return fmt.Errorf("request.secretHeaders must contain at most %d entries", MaxSecretHeaders)
+	}
+	for i, header := range secretHeaders {
+		if !validHeaderName(header.Name) {
+			return fmt.Errorf("request.secretHeaders[%d] contains invalid header name %q", i, header.Name)
+		}
+		canonicalName := strings.ToLower(header.Name)
+		if isTransportHeader(canonicalName) {
+			return fmt.Errorf("request.secretHeaders must not set transport header %q", header.Name)
+		}
+		if _, exists := seen[canonicalName]; exists {
+			return fmt.Errorf("request header %q is configured more than once", header.Name)
+		}
+		seen[canonicalName] = struct{}{}
+		if !secretHeaderPathAllowed(header.ValueFile) {
+			return fmt.Errorf(
+				"request.secretHeaders[%d].valueFile must be below %s",
+				i,
+				SecretHeadersMountPath,
+			)
 		}
 	}
 	return nil
+}
+
+func validHeaderName(name string) bool {
+	return name != "" && !strings.ContainsAny(name, " \t\r\n:")
+}
+
+func isTransportHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "host", "content-length", "transfer-encoding", "connection":
+		return true
+	default:
+		return false
+	}
+}
+
+func secretHeaderPathAllowed(path string) bool {
+	cleanPath := pathpkg.Clean(path)
+	cleanRoot := pathpkg.Clean(SecretHeadersMountPath)
+	return strings.HasPrefix(cleanPath, "/") &&
+		strings.HasPrefix(cleanPath, cleanRoot+"/")
 }
 
 func isSensitiveHeader(name string) bool {
