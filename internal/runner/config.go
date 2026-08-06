@@ -18,6 +18,12 @@ const (
 	MaxOperations            = 64
 	MaxStores                = 32
 	MaxStoreCapacity         = 100_000
+	MaxSecretHeaders         = 64
+	MaxSecretHeaderBytes     = 16 << 10
+
+	// SecretHeadersMountPath is controller-owned. Generated runner
+	// configuration may reference files only below this directory.
+	SecretHeadersMountPath = "/var/run/kurama/request-secrets"
 )
 
 // Config is the version-independent contract consumed by a runner Pod. It
@@ -73,11 +79,19 @@ type OperationConfig struct {
 }
 
 type RequestConfig struct {
-	Method       string            `json:"method"`
-	PathTemplate string            `json:"pathTemplate"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	BodyTemplate string            `json:"bodyTemplate,omitempty"`
-	Variables    []VariableConfig  `json:"variables,omitempty"`
+	Method        string               `json:"method"`
+	PathTemplate  string               `json:"pathTemplate"`
+	Headers       map[string]string    `json:"headers,omitempty"`
+	SecretHeaders []SecretHeaderConfig `json:"secretHeaders,omitempty"`
+	BodyTemplate  string               `json:"bodyTemplate,omitempty"`
+	Variables     []VariableConfig     `json:"variables,omitempty"`
+}
+
+// SecretHeaderConfig deliberately contains only the projected file path, not
+// the Kubernetes Secret name, key or value.
+type SecretHeaderConfig struct {
+	Name      string `json:"name"`
+	ValueFile string `json:"valueFile"`
 }
 
 type VariableConfig struct {

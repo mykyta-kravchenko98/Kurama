@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	trafficv1alpha1 "github.com/mykyta-kravchenko98/Kurama/api/v1alpha1"
 )
@@ -56,8 +57,38 @@ func validateScenario(scenario *trafficv1alpha1.TrafficScenario) error {
 	if err := validateRunnerResources(scenario); err != nil {
 		return err
 	}
+	if err := validateSecretHeaderReferences(scenario); err != nil {
+		return err
+	}
 	if err := scenarioRunnerConfig(scenario).Validate(); err != nil {
 		return fmt.Errorf("spec: %w", err)
+	}
+	return nil
+}
+
+func validateSecretHeaderReferences(scenario *trafficv1alpha1.TrafficScenario) error {
+	for operationIndex, operation := range scenario.Spec.Operations {
+		for headerIndex, header := range operation.Request.SecretHeaders {
+			ref := header.ValueFrom.SecretKeyRef
+			if problems := k8svalidation.IsDNS1123Subdomain(ref.Name); len(problems) != 0 {
+				return fmt.Errorf(
+					"spec.operations[%d].request.secretHeaders[%d].valueFrom.secretKeyRef.name %q is invalid: %s",
+					operationIndex,
+					headerIndex,
+					ref.Name,
+					problems[0],
+				)
+			}
+			if problems := k8svalidation.IsConfigMapKey(ref.Key); len(problems) != 0 {
+				return fmt.Errorf(
+					"spec.operations[%d].request.secretHeaders[%d].valueFrom.secretKeyRef.key %q is invalid: %s",
+					operationIndex,
+					headerIndex,
+					ref.Key,
+					problems[0],
+				)
+			}
+		}
 	}
 	return nil
 }

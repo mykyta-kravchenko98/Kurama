@@ -157,16 +157,48 @@ type VariableSpec struct {
 	Source VariableSourceSpec `json:"source"`
 }
 
+// SecretKeySelector identifies one key in a Kubernetes Secret in the same
+// namespace as the TrafficScenario. The secret value is mounted by kubelet;
+// it is never copied into the runner ConfigMap.
+type SecretKeySelector struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key"`
+}
+
+type SecretHeaderValueSource struct {
+	SecretKeyRef SecretKeySelector `json:"secretKeyRef"`
+}
+
+// SecretHeaderSpec sets an HTTP header from a Kubernetes Secret. Use this for
+// authorization tokens and other credentials instead of literal headers.
+type SecretHeaderSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Name      string                  `json:"name"`
+	ValueFrom SecretHeaderValueSource `json:"valueFrom"`
+}
+
 type RequestSpec struct {
 	// +kubebuilder:validation:Enum=GET;POST
 	Method string `json:"method"`
 	// +kubebuilder:validation:MinLength=1
 	PathTemplate string `json:"pathTemplate"`
-	// Literal sensitive headers are forbidden until SecretRef-backed authentication is supported.
+	// Known credential-bearing headers cannot be set literally; use
+	// SecretHeaders for those values.
 	// +kubebuilder:validation:MaxProperties=64
-	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().matches('^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$'))",message="literal sensitive headers are forbidden; use SecretRef support when it becomes available"
+	// +kubebuilder:validation:XValidation:rule="self.all(key, !key.lowerAscii().matches('^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)$'))",message="literal sensitive headers are forbidden; use secretHeaders"
 	// +optional
 	Headers map[string]string `json:"headers,omitempty"`
+	// SecretHeaders reads header values from Kubernetes Secrets in the same
+	// namespace. Secret values are projected into the runner Pod and are not
+	// stored in the TrafficScenario or generated ConfigMap.
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	SecretHeaders []SecretHeaderSpec `json:"secretHeaders,omitempty"`
 	// +kubebuilder:validation:MaxLength=65536
 	// +optional
 	BodyTemplate string `json:"bodyTemplate,omitempty"`

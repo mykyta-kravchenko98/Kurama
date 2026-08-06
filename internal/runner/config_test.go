@@ -100,6 +100,21 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid pointer escape", mutate: func(c *Config) { c.Operations[0].Capture.JSONPointer = "/short~URL" }, wantErr: "invalid RFC 6901"},
 		{name: "invalid status", mutate: func(c *Config) { c.Operations[0].ExpectedStatusCodes = []int{700} }, wantErr: "invalid HTTP status"},
 		{name: "transport header", mutate: func(c *Config) { c.Operations[0].Request.Headers["Host"] = "other.test" }, wantErr: "transport header"},
+		{name: "secret transport header", mutate: func(c *Config) {
+			c.Operations[0].Request.SecretHeaders = []SecretHeaderConfig{{
+				Name: "Content-Length", ValueFile: SecretHeadersMountPath + "/auth",
+			}}
+		}, wantErr: "transport header"},
+		{name: "duplicate literal and secret header", mutate: func(c *Config) {
+			c.Operations[0].Request.SecretHeaders = []SecretHeaderConfig{{
+				Name: "content-type", ValueFile: SecretHeadersMountPath + "/auth",
+			}}
+		}, wantErr: "configured more than once"},
+		{name: "secret header path outside mount", mutate: func(c *Config) {
+			c.Operations[0].Request.SecretHeaders = []SecretHeaderConfig{{
+				Name: "Authorization", ValueFile: "/tmp/auth",
+			}}
+		}, wantErr: "must be below"},
 	}
 
 	for _, test := range tests {
@@ -112,6 +127,18 @@ func TestConfigValidateRejectsInvalidConfiguration(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfigValidateAcceptsSensitiveSecretHeader(t *testing.T) {
+	t.Parallel()
+	config := validConfig()
+	config.Operations[0].Request.SecretHeaders = []SecretHeaderConfig{{
+		Name:      "Authorization",
+		ValueFile: SecretHeadersMountPath + "/operation-000-header-000",
+	}}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() rejected secret-backed Authorization header: %v", err)
 	}
 }
 

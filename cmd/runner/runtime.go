@@ -25,11 +25,12 @@ type storeSettings struct {
 
 type runtimeState struct {
 	runner.ValueStore
-	Limiter  ratelimit.Limiter
-	Schedule rateschedule.Schedule
-	redis    redis.UniversalClient
-	maintain func(context.Context) error
-	close    func() error
+	Limiter           ratelimit.Limiter
+	Schedule          rateschedule.Schedule
+	redis             redis.UniversalClient
+	secretHeaderFiles []string
+	maintain          func(context.Context) error
+	close             func() error
 }
 
 func (s *runtimeState) Close() error {
@@ -37,11 +38,16 @@ func (s *runtimeState) Close() error {
 }
 
 func (s *runtimeState) Ready(ctx context.Context) error {
-	if s.redis == nil {
-		return nil
+	if s.redis != nil {
+		if err := s.redis.Ping(ctx).Err(); err != nil {
+			return fmt.Errorf("ping Redis: %w", err)
+		}
 	}
-	if err := s.redis.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("ping Redis: %w", err)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := runner.CheckSecretHeaderFiles(s.secretHeaderFiles); err != nil {
+		return fmt.Errorf("check request credentials: %w", err)
 	}
 	return nil
 }

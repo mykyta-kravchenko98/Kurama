@@ -32,8 +32,103 @@ Kurama rejects literal values in known credential-bearing headers as a
 guardrail against accidentally storing common credentials in a
 `TrafficScenario`. Arbitrary scenario fields, including request paths, bodies
 and custom headers, may still contain sensitive strings and must not be used
-for credentials. Supported authentication will use Kubernetes Secret
-references without storing secret values directly in the custom resource.
+for credentials. Authentication headers can reference keys in same-namespace
+Kubernetes Secrets. The controller stores only projected file paths in the
+runner ConfigMap; secret values are mounted by kubelet and never copied into
+the custom resource, generated `scenario.json` or Kurama logs.
+
+## Secret-backed request headers
+
+The intended flow is AWS Secrets Manager -> External Secrets Operator (ESO)
+-> a namespaced Kubernetes Secret -> the Kurama runner's read-only projected
+volume. `ExternalSecret.spec.target.name` is the name of the Kubernetes Secret
+that ESO creates or maintains; it does not add data to an unrelated existing
+application Secret unless that exact target name is deliberately reused.
+
+Create the remote value in the AWS Console:
+
+1. Open **Secrets Manager -> Store a new secret -> Other type of secret**.
+2. Choose **Plaintext** and enter
+   `{"authorization":"Bearer replace-with-the-real-token"}`.
+3. Name the secret `shorturl/api-auth` and store it in the region used by the
+   cluster's ESO `SecretStore` (the local setup currently uses
+   `eu-central-1`).
+4. Ensure the IAM identity used by the `SecretStore` may call
+   `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret` for
+   this secret ARN.
+
+The equivalent PowerShell command uses the existing `shorturl` profile. The
+token is read interactively so it is not written literally into shell
+history:
+
+```powershell
+$env:AWS_PROFILE = "shorturl"
+$secureToken = Read-Host "API token" -AsSecureString
+$token = [Net.NetworkCredential]::new("", $secureToken).Password
+$payload = @{ authorization = "Bearer $token" } | ConvertTo-Json -Compress
+
+aws secretsmanager create-secret `
+  --region eu-central-1 `
+  --name shorturl/api-auth `
+  --secret-string $payload
+
+Remove-Variable secureToken,token,payload
+```
+
+For an already existing AWS secret, replace `create-secret` with:
+
+```powershell
+aws secretsmanager put-secret-value `
+  --region eu-central-1 `
+  --secret-id shorturl/api-auth `
+  --secret-string $payload
+```
+
+Sync that property into a dedicated Kubernetes Secret:
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: shorturl-api-auth
+  namespace: shorturl
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: SecretStore
+  target:
+    name: shorturl-api-auth
+    creationPolicy: Owner
+  data:
+    - secretKey: authorization
+      remoteRef:
+        key: shorturl/api-auth
+        property: authorization
+```
+
+Reference the generated Kubernetes Secret from an operation:
+
+```yaml
+request:
+  method: GET
+  pathTemplate: /api/v1/protected
+  secretHeaders:
+    - name: Authorization
+      valueFrom:
+        secretKeyRef:
+          name: shorturl-api-auth
+          key: authorization
+```
+
+Secret references are namespace-local. Updating the AWS value is propagated
+by ESO and the projected volume, and the runner reads the current value for
+each request without requiring a rollout. If the Secret or key is missing,
+the Pod remains live but its readiness endpoint returns an error. Anyone who
+can create or update a `TrafficScenario` in a namespace can currently cause a
+runner to use Secrets from that namespace, so write access to this CR must be
+treated as credential-use permission. A future policy/profile layer can
+restrict the set of allowed Secret references more narrowly.
 
 ## Implementation status and roadmap
 

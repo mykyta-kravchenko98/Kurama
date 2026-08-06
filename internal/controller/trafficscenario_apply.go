@@ -109,6 +109,31 @@ func applyManagedDeploymentFields(existing, desired *appsv1.Deployment) {
 	applyManagedPodSecurityContext(existingPodSpec, desiredPodSpec.SecurityContext)
 	applyManagedRunnerContainer(existingPodSpec, desiredPodSpec.Containers[0])
 	applyManagedScenarioVolume(existingPodSpec, desiredPodSpec.Volumes[0])
+	applyManagedSecretHeaderVolume(existingPodSpec, desiredPodSpec)
+}
+
+func applyManagedSecretHeaderVolume(podSpec *corev1.PodSpec, desiredPodSpec *corev1.PodSpec) {
+	var desired *corev1.Volume
+	for i := range desiredPodSpec.Volumes {
+		if desiredPodSpec.Volumes[i].Name == secretHeadersVolumeName {
+			desired = &desiredPodSpec.Volumes[i]
+			break
+		}
+	}
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name != secretHeadersVolumeName {
+			continue
+		}
+		if desired == nil {
+			podSpec.Volumes = append(podSpec.Volumes[:i], podSpec.Volumes[i+1:]...)
+			return
+		}
+		podSpec.Volumes[i].VolumeSource = *desired.VolumeSource.DeepCopy()
+		return
+	}
+	if desired != nil {
+		podSpec.Volumes = append(podSpec.Volumes, *desired.DeepCopy())
+	}
 }
 
 func applyManagedPodSecurityContext(podSpec *corev1.PodSpec, desired *corev1.PodSecurityContext) {

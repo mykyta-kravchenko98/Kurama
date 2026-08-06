@@ -81,6 +81,17 @@ func desiredDeployment(
 			},
 		}},
 	}
+	if secretVolume := desiredSecretHeaderVolume(scenario); secretVolume != nil {
+		podSpec.Volumes = append(podSpec.Volumes, *secretVolume)
+		podSpec.Containers[0].VolumeMounts = append(
+			podSpec.Containers[0].VolumeMounts,
+			corev1.VolumeMount{
+				Name:      secretHeadersVolumeName,
+				MountPath: runner.SecretHeadersMountPath,
+				ReadOnly:  true,
+			},
+		)
+	}
 	if imagePullSecret != "" {
 		podSpec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: imagePullSecret}}
 	}

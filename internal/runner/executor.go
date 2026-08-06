@@ -87,8 +87,8 @@ func (e *Executor) Execute(ctx context.Context, operation OperationConfig) (resu
 	if err != nil {
 		return result, fmt.Errorf("create operation %q request: %w", operation.Name, err)
 	}
-	for name, value := range operation.Request.Headers {
-		request.Header.Set(name, value)
+	if err := applyRequestHeaders(request, operation.Request); err != nil {
+		return result, fmt.Errorf("prepare operation %q request headers: %w", operation.Name, err)
 	}
 
 	response, err := e.client.Do(request)
