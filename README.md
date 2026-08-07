@@ -221,7 +221,7 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Added a provisioned Kurama store dashboard to `shorturl-gitops` and verified
   that Prometheus scrapes the live runner metrics.
 
-### Phase 4 — dynamic traffic profiles
+### Phase 4 — dynamic traffic profiles (complete)
 
 - Kept fixed request timing as the default and added a uniform-random delay
   profile using the current schedule RPM as its mean rate.
