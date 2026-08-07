@@ -251,8 +251,17 @@ turning it into an in-house replacement for a complete load-testing platform.
 - Compare dynamic load profiles through the dashboards maintained in
   `shorturl-gitops`.
 - Reject literal `Authorization`, `Proxy-Authorization`, `Cookie`,
-  `Set-Cookie` and `X-API-Key` headers at CRD admission and runner validation
-  until SecretRef-backed authentication is available.
+  `Set-Cookie` and `X-API-Key` headers at CRD admission and runner validation,
+  while allowing request headers to read their values from same-namespace
+  Kubernetes `Secret` references.
+- Project secret-backed header values directly into runner Pods without
+  copying them into the `TrafficScenario`, generated `scenario.json` or
+  Kurama logs. Re-read projected values for every request so ESO rotations do
+  not require a runner rollout, and report missing credentials through
+  readiness without failing liveness.
+- Verify the complete authentication path in the local cluster: AWS Secrets
+  Manager -> External Secrets Operator -> Kubernetes `Secret` -> projected
+  runner volume -> authenticated HTTP request.
 - Generate runner Pods with no service-account token or service links, a
   read-only root filesystem, no Linux capabilities or privilege escalation,
   non-root execution and the runtime-default seccomp profile.
@@ -261,8 +270,9 @@ turning it into an in-house replacement for a complete load-testing platform.
 
 ### Phase 5 — future backlog for reusable and hardened HTTP scenarios
 
-- Add `none`, bearer-token, API-key and basic authentication, always through
-  Kubernetes `Secret` references.
+- Add optional typed bearer-token, API-key and basic-auth profiles as
+  convenience layers over the existing generic secret-backed headers when a
+  real scenario requires them.
 - Add OAuth2 client-credentials only when a real target requires it.
 - Add restricted header templates where real scenarios require them.
 - Make random generation reproducible with an optional scenario seed.
